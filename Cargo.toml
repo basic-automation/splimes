@@ -1,0 +1,28 @@
+[package]
+name = "splimes"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+bigdecimal = { workspace = true, features = ["serde"] }
+thiserror = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+flume = { workspace = true }
+wide = { workspace = true }
+num_cpus = { workspace = true }
+rayon = { workspace = true }
+tokio = { workspace = true }
+futures-channel = { workspace = true }
+pollster = { workspace = true }
+sysinfo = { workspace = true }
+tempfile = { workspace = true }
+futures = { workspace = true }
+fake = { workspace = true, features = ["derive", "bigdecimal", "chrono"] }
+rand = { workspace = true }
+
+[dev-dependencies]
+ratatui = { workspace = true, features = ["default", "all-widgets", "document-features", "macros", "palette", "scrolling-regions", "serde", "termion", "termwiz"] }
+crossterm = { workspace = true, features = ["event-stream", "filedescriptor", "libc", "osc52", "serde"]}
