@@ -1,19 +1,16 @@
 #[cfg(test)]
 pub mod tests {
+	// Make it pub so other test modules can access it
 	use std::sync::LazyLock;
 
 	use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, Zero};
 	use chrono::{DateTime, Utc};
 	use fake::{Fake, Faker};
+	use serial_test::serial;
 
-	use super::super::plot_terminal;
-	use crate::{Point, Resolution, TargetTimesIterator, auto_interpolate, gpu_interpolate, linear, parallel_interpolate};
+	use crate::{Point, Resolution, auto_interpolate, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::linear, tests::plot_terminal};
 
-	pub const Z_THRESHOLD: f64 = 2.0;
-	pub const COS_THRESHOLD: f64 = 1e-8;
-	pub const RESOLUTION: Resolution = Resolution::Seconds;
-
-	pub const POINTS: LazyLock<Vec<Point>> = LazyLock::new(|| {
+	pub static POINTS: LazyLock<Vec<Point>> = LazyLock::new(|| {
 		let mut points: Vec<Point> = Vec::new();
 		let mut rng = rand::thread_rng();
 		for _ in 0..10 {
@@ -23,6 +20,10 @@ pub mod tests {
 		points.sort_by_key(|p| p.timestamp);
 		points
 	});
+
+	pub const Z_THRESHOLD: f64 = 2.0;
+	pub const COS_THRESHOLD: f64 = 1e-8;
+	pub const RESOLUTION: Resolution = Resolution::Seconds;
 
 	pub fn mean(values: &[BigDecimal]) -> BigDecimal {
 		let sum: BigDecimal = values.iter().cloned().sum();
@@ -80,6 +81,7 @@ pub mod tests {
 	}
 
 	#[tokio::test]
+	#[serial]
 	async fn test_linear_interpolation() {
 		let mut points = POINTS.clone();
 		let start = {

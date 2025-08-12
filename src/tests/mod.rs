@@ -1,8 +1,8 @@
+pub mod cubic;
+pub mod linear;
+pub mod plot;
+pub mod polynomial;
+pub mod quadratic;
+
 #[cfg(test)]
 pub use plot::test::plot_terminal;
-
-mod cubic;
-mod linear;
-mod plot;
-mod polynomial;
-mod quadratic;

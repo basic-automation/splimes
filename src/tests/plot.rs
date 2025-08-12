@@ -1,19 +1,19 @@
-#[cfg(test)]
 pub mod test {
+	use std::io;
+
 	use bigdecimal::ToPrimitive;
-	use crossterm::terminal;
 
 	use crate::Point;
 
-	pub fn plot_terminal(title: &str, points: Vec<Point>) -> Result<(), Box<dyn std::error::Error>> {
+	#[allow(dead_code)]
+	pub fn plot_terminal(title: &str, points: Vec<Point>) -> io::Result<()> {
 		if points.is_empty() {
 			return Ok(());
 		}
 
-		// Get terminal size and use 50% width
-		let (term_width, _) = terminal::size()?;
-		let chart_width = (term_width / 2) as usize;
-		let chart_height = 15;
+		// Use a fixed width for the ASCII chart
+		let chart_width: usize = 60;
+		let chart_height: usize = 15;
 
 		// Convert to chart data
 		let data: Vec<f64> = points.iter().map(|p| p.value.to_f64().unwrap_or(0.0)).collect();

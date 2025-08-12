@@ -115,7 +115,7 @@ fn simd_linear_interpolate(input_times: &[f64], input_values: &[f64], target_tim
 			slope.mul_add(t - t1, v1)
 		} else {
 			let alpha = if (t1 - t0).abs() < f64::EPSILON { 0.0 } else { (t - t0) / (t1 - t0) };
-			v0 + alpha * (v1 - v0)
+			alpha.mul_add(v1 - v0, v0)
 		};
 		results[i] = round_to_places(result, 10);
 	}

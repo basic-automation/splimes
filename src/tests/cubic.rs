@@ -1,13 +1,16 @@
 #[cfg(test)]
 mod tests {
 	use chrono::{DateTime, Utc};
+	use serial_test::serial;
 
-	use super::super::plot_terminal;
 	use crate::{
-		Resolution, TargetTimesIterator, auto_interpolate, cubic, gpu_interpolate, parallel_interpolate, tests::linear::tests::{COS_THRESHOLD, POINTS, RESOLUTION, Z_THRESHOLD, check_similarity}
+		Resolution, auto_interpolate, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::cubic, tests::{
+			linear::tests::{COS_THRESHOLD, POINTS, RESOLUTION, Z_THRESHOLD, check_similarity}, plot_terminal
+		}
 	};
 
 	#[tokio::test]
+	#[serial]
 	async fn test_cubic_interpolation() {
 		let mut points = POINTS.clone();
 		let start = {

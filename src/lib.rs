@@ -1,13 +1,11 @@
 #![warn(clippy::pedantic, clippy::nursery, clippy::all)]
 #![allow(clippy::multiple_crate_versions, clippy::used_underscore_binding, clippy::similar_names, clippy::module_name_repetitions, clippy::module_inception)]
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-pub(crate) use gpu::gpu_interpolate;
-pub(crate) use helpers::{InterpolationState, TargetTimesIterator, batch, estimate_output_points, generate_target_times, should_use_gpu};
+use helpers::should_use_gpu;
 pub use optimizations::{apply_fast_path, cpu_interpolate, parallel_interpolate};
-pub(crate) use splines::{cubic, cubic_simd, linear, linear_simd, polynomial, polynomial_simd, quadratic, quadratic_simd};
-pub use types::{BASE_BATCH_SIZE, Error, POINT_SIZE, Point, Resolution, Spline};
+pub use types::{Error, Point, Resolution, Spline, BASE_BATCH_SIZE, POINT_SIZE};
 
 mod gpu;
 mod helpers;
@@ -15,6 +13,11 @@ mod optimizations;
 mod splines;
 mod tests;
 mod types;
+
+// Re-export for public API
+pub use gpu::gpu_interpolate;
+pub use helpers::{estimate_output_points, generate_target_times};
+pub use splines::{DAYS_IN_MONTH, DAYS_IN_YEAR, SECONDS_IN_DAY, SECONDS_IN_HOUR, SECONDS_IN_MINUTE, SECONDS_IN_MONTH, SECONDS_IN_WEEK, SECONDS_IN_YEAR};
 
 /// Main async interpolation function with GPU acceleration support
 ///
@@ -39,16 +42,31 @@ pub async fn auto_interpolate(points: &mut [Point], start: DateTime<Utc>, end: D
 	}
 
 	let estimated_output_points = estimate_output_points(start, end, resolution);
-	let use_gpu = should_use_gpu(points.len(), estimated_output_points);
 	let spline = apply_fast_path(spline, points.len());
 
+	// Based on benchmark results:
+	// - GPU has ~800ms overhead, unsuitable for datasets we've tested
+	// - Parallel is fastest for medium to large datasets (500+ inputs)
+	// - For very small datasets, there might be some overhead in parallel setup
+
+	let use_gpu = should_use_gpu(points.len(), estimated_output_points);
+
 	if use_gpu {
-		// Try GPU interpolation with fallback - clone measurements to avoid ownership issues
+		// Try GPU interpolation with fallback
 		if let Ok(result) = gpu_interpolate(points, start, end, resolution, spline).await {
 			return Ok(result);
 		}
+		// If GPU fails, fall through to CPU strategies
 	}
 
-	// CPU implementation with optimal strategy selection
-	cpu_interpolate(points, start, end, resolution, spline).await
+	// For small datasets (< 100 inputs), the overhead of parallel processing
+	// might not be worth it based on auto performance regression for small sizes
+	// For larger datasets, parallel is clearly superior
+	if points.len() >= 100 || estimated_output_points >= 100 {
+		// Use parallel for medium to large datasets where it's clearly faster
+		parallel_interpolate(points, &start, &end, spline, resolution).await
+	} else {
+		// Use CPU strategies for very small datasets to avoid parallel overhead
+		cpu_interpolate(points, start, end, resolution, spline).await
+	}
 }

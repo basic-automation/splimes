@@ -24,5 +24,15 @@ fake = { workspace = true, features = ["derive", "bigdecimal", "chrono"] }
 rand = { workspace = true }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["async_futures"] }
+rand = "0.8"
+rand_chacha = "0.3"
+bigdecimal = { version = "0.4", features = ["serde"] } # If not already present
+chrono = "0.4"
+serial_test = "3.0"
 ratatui = { workspace = true, features = ["default", "all-widgets", "document-features", "macros", "palette", "scrolling-regions", "serde", "termion", "termwiz"] }
 crossterm = { workspace = true, features = ["event-stream", "filedescriptor", "libc", "osc52", "serde"]}
+
+[[bench]]
+name = "interpolation"
+harness = false

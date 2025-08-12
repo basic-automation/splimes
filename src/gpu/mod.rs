@@ -9,9 +9,11 @@ pub use helpers::get_max_buffer_size;
 use sysinfo::System;
 use tempfile::NamedTempFile;
 pub use types::{GpuInterpolator, Method};
-use wgpu::util::DeviceExt; // Added missing import
+use wgpu::util::DeviceExt;
 
-use crate::{BASE_BATCH_SIZE, Error, InterpolationState, POINT_SIZE, Point, Resolution, Result, Spline, TargetTimesIterator, batch};
+use crate::{
+	helpers::{batch, InterpolationState, TargetTimesIterator}, Error, Point, Resolution, Result, Spline, POINT_SIZE
+};
 
 mod helpers;
 mod shaders;
@@ -28,8 +30,12 @@ pub async fn gpu_interpolate(points: &mut [Point], start: DateTime<Utc>, end: Da
 		Spline::Cubic => Method::Cubic,
 		Spline::Polynomial(degree, _) => Method::Polynomial(points.len().min(degree + 1)),
 	};
-	let mut interpolator = GpuInterpolator::new().await?;
-	if interpolator.supports_f64() { gpu_interpolate_f64(points, &start, &end, &resolution, &method, &mut interpolator).await } else { batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await }
+	// Use static method to check f64 support instead of creating new instance
+	if GpuInterpolator::supports_f64_static()? {
+		gpu_interpolate_f64(points, &start, &end, &resolution, &method, &spline).await
+	} else {
+		batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await
+	}
 }
 
 pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
@@ -60,9 +66,9 @@ pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 		batch_times.len()
 	};
 
-	let mut interpolator = GpuInterpolator::new().await?;
+	// Remove the local interpolator creation
 	let mut b = Vec::with_capacity(batch_size);
-	let mut time_offset = 0;
+	let mut time_offset = 0usize;
 
 	for batch in batch_times.chunks(batch_size) {
 		let target_times_array = helpers::convert_datetimes_to_gpu_format_f32(batch, state.resolution, input_points[0].timestamp)?;
@@ -70,72 +76,55 @@ pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 		let m_b = usize::from_u64(m_b).ok_or_else(|| Error::ConversionError("Failed to convert buffer size to usize".to_string()))?;
 		let max_single_buffer_size = m_b / NUMBER_OF_BUFFERS;
 		let max_targets_per_batch = (max_single_buffer_size / F64_SIZE).min(target_times_array.len());
-		let (input_times, input_values) = helpers::convert_points_to_gpu_format_f32(input_points, state.resolution)?;
 
-		let mut batch_results = Vec::new();
 		for target_batch in target_times_array.chunks(max_targets_per_batch) {
-			let config = match state.spline {
-				Spline::Polynomial(degree, bounds_factor) => {
-					let b_f = f32::from_f64(bounds_factor.unwrap_or_else(|| f64::from(f32::NAN))).ok_or_else(|| Error::ConversionError("Failed to convert bounds factor to f32".to_string()))?;
-					let d = u32::from_usize(degree).ok_or_else(|| Error::ConversionError("Failed to convert degree to u32".to_string()))?;
-					let t_o = u32::from_usize(time_offset).ok_or_else(|| Error::ConversionError("Failed to convert time offset to u32".to_string()))?;
-					[t_o.to_le_bytes().to_vec(), d.to_le_bytes().to_vec(), b_f.to_bits().to_le_bytes().to_vec()].concat()
+			let (input_times, input_values) = helpers::convert_points_to_gpu_format_f32(input_points, state.resolution)?;
+			let config = match method {
+				Method::Linear => [time_offset as u32, 1, 0, 0],
+				Method::Quadratic => [time_offset as u32, 2, 0, 0],
+				Method::Cubic => [time_offset as u32, 3, 0, 0],
+				Method::Polynomial(degree) => {
+					let bounds_factor = match state.spline {
+						Spline::Polynomial(_, Some(factor)) => factor as f32,
+						_ => f32::NAN,
+					};
+					[time_offset as u32, degree as u32, bounds_factor.to_bits(), 0]
 				}
-				_ => [0u32.to_le_bytes().to_vec(), [0u32.to_le_bytes().to_vec(), f32::NAN.to_bits().to_le_bytes().to_vec()].concat()].concat(),
 			};
-
-			let config_buffer = interpolator.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("content"), contents: &config, usage: wgpu::BufferUsages::UNIFORM });
-
-			let results: Vec<f32> = interpolator.interpolate_f32(&input_times, &input_values, target_batch, &method, &config_buffer)?;
-			let batch_slice = &batch[time_offset..time_offset + results.len()];
-			let points = helpers::convert_gpu_results_to_points_f32(results, batch_slice);
-			time_offset += points.len();
-
-			if let Some(writer) = &mut state.temp_file {
-				for point in points {
-					writeln!(writer.lock().await, "{},{}", point.timestamp.to_rfc3339(), point.value)?;
-				}
-			} else if let Some(result) = &mut state.result {
-				result.extend(points);
-			} else {
-				batch_results.extend_from_slice(&points);
-			}
-		}
-
-		time_offset = 0;
-
-		if let Some(writer) = &mut state.temp_file {
-			let mut writer = writer.lock().await;
-			writer.flush().map_err(|e| Error::IOError(e.to_string()))?;
-		} else if let Some(result) = &mut state.result {
-			result.extend(batch_results.clone());
-		}
-
-		if batch_results.is_empty() && state.temp_file.is_none() {
+			// Use static method instead of instance method - convert config to bytes
+			let config_bytes = bytemuck::cast_slice(&config);
+			let config_buffer = GpuInterpolator::get_device_static()?.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("content"), contents: config_bytes, usage: wgpu::BufferUsages::UNIFORM });
+			// Use static interpolation method
+			let results: Vec<f32> = GpuInterpolator::interpolate_f32_static(&input_times, &input_values, target_batch, &method, &config_buffer)?;
+			let target_slice = &batch[time_offset..time_offset + target_batch.len()];
+			let batch_results = helpers::convert_gpu_results_to_points_f32(results, target_slice);
 			b.extend(batch_results);
+			time_offset += target_batch.len();
 		}
+		time_offset = 0;
 	}
 	if let Some(result) = &mut state.result {
 		result.extend(b);
-	} else if let Some(writer) = &mut state.temp_file {
-		let mut writer = writer.lock().await;
-		for point in b {
-			writeln!(writer, "{},{}", point.timestamp.to_rfc3339(), point.value)?;
+	} else if let Some(writer_mutex) = &state.temp_file {
+		let mut writer = writer_mutex.lock().await;
+		for point in &b {
+			writeln!(writer, "{},{}", point.timestamp.timestamp_millis(), point.value)?;
 		}
 		writer.flush().map_err(|e| Error::IOError(e.to_string()))?;
 	} else if !b.is_empty() {
-		state.result = Some(b);
+		bail!("No output destination available");
 	}
 
 	Ok(())
 }
 
-pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: &Resolution, method: &Method, interpolator: &mut GpuInterpolator) -> Result<Vec<Point>> {
+// Remove the interpolator parameter since we're using the static global one
+pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: &Resolution, method: &Method, spline: &Spline) -> Result<Vec<Point>> {
 	if points.len() < 2 {
-		bail!(Error::InsufficientPointsError);
+		bail!("Insufficient points for interpolation");
 	}
 	if start >= end {
-		bail!(Error::InvalidTimeRangeError);
+		bail!("Invalid time range");
 	}
 
 	let mut system = System::new_all();
@@ -156,84 +145,71 @@ pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &
 	let rounded_end = resolution.round(end)?;
 	let time_iter = TargetTimesIterator::new(rounded_start, rounded_end, *resolution);
 	if let Ok(estimated_points) = time_iter.estimate_len() {
-		if estimated_points < BASE_BATCH_SIZE * 2 {
-			result.reserve(estimated_points);
-		} else if estimated_points > 1_000_000 {
+		system.refresh_memory();
+		let estimated_memory = estimated_points as u64 * point_size;
+		if estimated_memory > memory_threshold {
 			let temp = NamedTempFile::new().map_err(|e| Error::IOError(e.to_string()))?;
-			temp_path = Some(temp.into_temp_path());
-			temp_file = Some(BufWriter::new(File::create(temp_path.as_ref().unwrap()).map_err(|e| Error::IOError(e.to_string()))?));
+			let (file, path) = temp.into_parts();
+			temp_file = Some(BufWriter::new(file));
+			temp_path = Some(path);
 		}
 	}
 	for batch_times in time_iter {
-		system.refresh_memory();
-		let available_memory = system.available_memory();
-		let batch_size = if available_memory < memory_threshold {
-			let max_points = usize::try_from((available_memory / point_size).max(50))?;
-			batch_times.len().min(max_points / 2)
-		} else {
-			batch_times.len()
-		};
-		let mut batch = Vec::with_capacity(batch_size);
+		let batch_size = batch_times.len();
+		if batch_size == 0 {
+			continue;
+		}
 
-		let target_times = helpers::convert_datetimes_to_gpu_format_f64(&batch_times[..batch_size], *resolution, base_time)?;
-		let b_size = get_max_buffer_size().await?;
-		let b_size = usize::from_u64(b_size).ok_or_else(|| Error::ConversionError("Failed to convert buffer size to usize".to_string()))?;
-		let max_single_buffer_size = b_size / NUMBER_OF_BUFFERS / element_size;
-		let max_targets_per_batch = (max_single_buffer_size / element_size).min(target_times.len());
+		let target_times_array = helpers::convert_datetimes_to_gpu_format_f64(&batch_times, *resolution, base_time)?;
+		let max_buffer_size = get_max_buffer_size().await?;
+		let max_buffer_size_usize = usize::try_from(max_buffer_size)?;
+		let max_single_buffer_size = max_buffer_size_usize / NUMBER_OF_BUFFERS;
+		let max_targets_per_batch = (max_single_buffer_size / element_size).min(target_times_array.len());
 
-		for target_batch in target_times.chunks(max_targets_per_batch) {
+		let mut time_offset = 0usize;
+		for target_batch in target_times_array.chunks(max_targets_per_batch) {
 			let config = match method {
+				Method::Linear => [time_offset as u32, 1, 0, 0],
+				Method::Quadratic => [time_offset as u32, 2, 0, 0],
+				Method::Cubic => [time_offset as u32, 3, 0, 0],
 				Method::Polynomial(degree) => {
-					let d = u32::from_usize(*degree).unwrap_or(1);
-					[
-						0u32.to_le_bytes().to_vec(), // time_offset (not used in f64 for now)
-						d.to_le_bytes().to_vec(),
-						f64::NAN.to_bits().to_le_bytes().to_vec(),
-					]
-					.concat()
+					let bounds_factor = match spline {
+						Spline::Polynomial(_, Some(factor)) => *factor,
+						_ => f64::NAN,
+					};
+					[time_offset as u32, *degree as u32, bounds_factor.to_bits() as u32, 0]
 				}
-				_ => [0u32.to_le_bytes().to_vec(), [0u32.to_le_bytes().to_vec(), f64::NAN.to_bits().to_le_bytes().to_vec()].concat()].concat(),
 			};
-
-			let config_buffer = interpolator.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("content"), contents: &config, usage: wgpu::BufferUsages::UNIFORM });
-
-			let batch_results: Vec<f64> = interpolator.interpolate_f64(&input_times, &input_values, target_batch, method, &config_buffer)?;
-			let points = helpers::convert_gpu_results_to_points_f64(batch_results, &batch_times[..batch_size.min(target_batch.len())]);
-
-			if available_memory < memory_threshold && temp_file.is_none() {
-				let temp = NamedTempFile::new().map_err(|e| Error::IOError(e.to_string()))?;
-				temp_path = Some(temp.into_temp_path());
-				temp_file = Some(BufWriter::new(File::create(temp_path.as_ref().unwrap()).map_err(|e| Error::IOError(e.to_string()))?));
-			}
+			// Use static method instead of instance method - convert config to bytes
+			let config_bytes = bytemuck::cast_slice(&config);
+			let config_buffer = GpuInterpolator::get_device_static()?.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("content"), contents: config_bytes, usage: wgpu::BufferUsages::UNIFORM });
+			// Use static interpolation method
+			let batch_results: Vec<f64> = GpuInterpolator::interpolate_f64_static(&input_times, &input_values, target_batch, method, &config_buffer)?;
+			let target_slice = &batch_times[time_offset..time_offset + target_batch.len()];
+			let batch_points = helpers::convert_gpu_results_to_points_f64(batch_results, target_slice);
 
 			if let Some(writer) = temp_file.as_mut() {
-				for point in points {
-					writeln!(writer, "{},{}", point.timestamp.to_rfc3339(), point.value)?;
+				for point in &batch_points {
+					writeln!(writer, "{},{}", point.timestamp.timestamp_millis(), point.value)?;
 				}
 			} else {
-				batch.extend_from_slice(&points);
+				result.extend(batch_points);
 			}
-		}
-
-		if temp_file.is_none() {
-			result.extend(batch.into_iter());
-		}
-		if let Some(writer) = temp_file.as_mut() {
-			writer.flush().map_err(|e| Error::IOError(e.to_string()))?;
+			time_offset += target_batch.len();
 		}
 	}
 
 	if let Some(path) = &temp_path {
-		let file = File::open(path).map_err(|e| Error::IOError(e.to_string()))?;
+		drop(temp_file);
+		let file = std::fs::File::open(path).map_err(|e| Error::IOError(e.to_string()))?;
 		let reader = BufReader::new(file);
 		for line in reader.lines() {
 			let line = line.map_err(|e| Error::IOError(e.to_string()))?;
 			let parts: Vec<&str> = line.split(',').collect();
 			if parts.len() == 2 {
-				let timestamp = DateTime::parse_from_rfc3339(parts[0]).map_err(|e| Error::IOError(format!("Failed to parse timestamp '{}': {}", parts[0], e)))?.with_timezone(&Utc);
-				let value = parts[1].parse::<f64>().map_err(|e| Error::IOError(format!("Failed to parse value '{}': {}", parts[1], e)))?;
-				let value = BigDecimal::from_f64(value).unwrap_or_default();
-				result.push(Point { timestamp, value });
+				let timestamp = parts[0].parse::<i64>().map_err(|e| Error::ConversionError(e.to_string()))?;
+				let value = BigDecimal::from_f64(parts[1].parse::<f64>().map_err(|e| Error::ConversionError(e.to_string()))?).ok_or_else(|| Error::ConversionError("Failed to convert to BigDecimal".to_string()))?;
+				result.push(Point { timestamp: DateTime::from_timestamp_millis(timestamp).ok_or_else(|| Error::ConversionError("Invalid timestamp".to_string()))?, value });
 			}
 		}
 	}

@@ -1,16 +1,18 @@
 use std::io::Write;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
-use crate::{Error, InterpolationState, POINT_SIZE, Point, Resolution, Spline, batch, cubic, cubic_simd, generate_target_times, linear, linear_simd, polynomial, polynomial_simd, quadratic, quadratic_simd};
+use crate::{
+	generate_target_times, helpers::{batch, InterpolationState}, splines::{cubic, cubic_simd, linear, linear_simd, polynomial, polynomial_simd, quadratic, quadratic_simd}, Error, Point, Resolution, Spline, POINT_SIZE
+};
 
 mod fast_path;
 pub use fast_path::apply_fast_path; // Re-export apply_fast_path
 
-const SIMD_THRESHOLD: usize = 200;
+const SIMD_THRESHOLD: usize = 0; // Set to 0 based on benchmarks showing parallel is faster even for very small inputs (e.g., 10)
 const SIMD_THRESHOLD_PLUS_ONE: usize = SIMD_THRESHOLD + 1;
 
 /// # Errors
@@ -68,16 +70,22 @@ pub async fn p_interpolate(state: &mut InterpolationState) -> Result<()> {
 		batch_times.len()
 	};
 
+	// Extract values before parallel processing to avoid borrowing issues
+	let input_points_ref = input_points;
+	let batch_times_ref = batch_times;
+	let spline = state.spline;
+	let resolution = state.resolution;
+
 	// Collect chunks first, then process in parallel
-	let chunks: Vec<Vec<DateTime<Utc>>> = batch_times.chunks(batch_size).map(<[chrono::DateTime<chrono::Utc>]>::to_vec).collect();
+	let chunks: Vec<Vec<DateTime<Utc>>> = batch_times_ref.chunks(batch_size).map(<[chrono::DateTime<chrono::Utc>]>::to_vec).collect();
 
 	let chunk_results: Result<Vec<Vec<Point>>> = chunks
 		.par_iter()
-		.map(|times| match state.spline {
-			Spline::Linear => linear_simd(input_points, times, state.resolution),
-			Spline::Quadratic => Ok(quadratic_simd(input_points, times, state.resolution)),
-			Spline::Cubic => cubic_simd(input_points, times, state.resolution),
-			Spline::Polynomial(_, _) => polynomial_simd(input_points, times, state.resolution, &state.spline),
+		.map(|times| match spline {
+			Spline::Linear => linear_simd(input_points_ref, times, resolution),
+			Spline::Quadratic => Ok(quadratic_simd(input_points_ref, times, resolution)),
+			Spline::Cubic => cubic_simd(input_points_ref, times, resolution),
+			Spline::Polynomial(_, _) => polynomial_simd(input_points_ref, times, resolution, &spline),
 		})
 		.collect();
 
@@ -87,7 +95,7 @@ pub async fn p_interpolate(state: &mut InterpolationState) -> Result<()> {
 	let all_points: Vec<Point> = chunk_results.into_iter().flatten().collect();
 
 	// Verify we have the expected number of points
-	assert_eq!(all_points.len(), batch_times.len(), "Parallel processing lost points: expected {}, got {}", batch_times.len(), all_points.len());
+	assert_eq!(all_points.len(), batch_times_ref.len(), "Parallel processing lost points: expected {}, got {}", batch_times_ref.len(), all_points.len());
 
 	// Check if we should use temp file or in-memory storage
 	if state.temp_file.is_some() {

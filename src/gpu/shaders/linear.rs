@@ -6,7 +6,7 @@ pub const LINEAR_INTERPOLATION_SHADER_F64: &str = r"
 @group(0) @binding(3) var<storage, read_write> output_values: array<f64>;
 
 fn is_near_zero(val: f64) -> bool {
-    return abs(val) < 1e-12;
+    return abs(val) < f64(1e-12);
 }
 
 fn extrapolate(t: f64, t0: f64, v0: f64, t1: f64, v1: f64) -> f64 {
@@ -31,7 +31,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let input_count = arrayLength(&input_times);
     
     if (input_count == 0u) {
-        output_values[index] = 0.0;
+        output_values[index] = f64(0.0);
         return;
     }
     if (input_count == 1u) {
@@ -64,11 +64,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let left_idx = left;
     let right_idx = right;
     
-    if (abs(target_time - input_times[left_idx]) < 1e-12) {
+    if (abs(target_time - input_times[left_idx]) < f64(1e-12)) {
         output_values[index] = input_values[left_idx];
         return;
     }
-    if (abs(target_time - input_times[right_idx]) < 1e-12) {
+    if (abs(target_time - input_times[right_idx]) < f64(1e-12)) {
         output_values[index] = input_values[right_idx];
         return;
     }
