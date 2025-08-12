@@ -12,7 +12,7 @@ pub use types::{GpuInterpolator, Method};
 use wgpu::util::DeviceExt;
 
 use crate::{
-	helpers::{batch, InterpolationState, TargetTimesIterator}, Error, Point, Resolution, Result, Spline, POINT_SIZE
+	Error, POINT_SIZE, Point, Resolution, Result, Spline, helpers::{InterpolationState, TargetTimesIterator, batch}
 };
 
 mod helpers;
@@ -31,11 +31,7 @@ pub async fn gpu_interpolate(points: &mut [Point], start: DateTime<Utc>, end: Da
 		Spline::Polynomial(degree, _) => Method::Polynomial(points.len().min(degree + 1)),
 	};
 	// Use static method to check f64 support instead of creating new instance
-	if GpuInterpolator::supports_f64_static()? {
-		gpu_interpolate_f64(points, &start, &end, &resolution, &method, &spline).await
-	} else {
-		batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await
-	}
+	if GpuInterpolator::supports_f64_static()? { gpu_interpolate_f64(points, &start, &end, &resolution, &method, &spline).await } else { batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await }
 }
 
 pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {

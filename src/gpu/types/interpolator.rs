@@ -2,12 +2,12 @@ use std::{
 	borrow::Cow, collections::HashMap, sync::{LazyLock, Mutex}
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bigdecimal::FromPrimitive;
 use bytemuck::cast_slice;
 use tokio::runtime::Runtime;
 use wgpu::{
-	util::{BufferInitDescriptor, DeviceExt}, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Dx12Compiler, Features, Gles3MinorVersion, Instance, InstanceDescriptor, InstanceFlags, Limits, PowerPreference, Queue, RequestAdapterOptions, ShaderStages
+	Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Dx12Compiler, Features, Gles3MinorVersion, Instance, InstanceDescriptor, InstanceFlags, Limits, PowerPreference, Queue, RequestAdapterOptions, ShaderStages, util::{BufferInitDescriptor, DeviceExt}
 };
 
 use crate::gpu::Method;

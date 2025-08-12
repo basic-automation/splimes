@@ -1,13 +1,13 @@
 use std::io::Write;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use bigdecimal::{BigDecimal, FromPrimitive, One, ToPrimitive, Zero};
 use chrono::{DateTime, Utc};
 use wide::f64x4;
 
 use super::SIMD_BATCH_SIZE;
 use crate::{
-	helpers::{batch, InterpolationState}, Error, Point, Resolution, Spline
+	Error, Point, Resolution, Spline, helpers::{InterpolationState, batch}
 };
 
 pub async fn polynomial(points: &mut [Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: &Resolution, spline: &Spline) -> Result<Vec<Point>> {

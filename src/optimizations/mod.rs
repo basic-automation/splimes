@@ -1,12 +1,12 @@
 use std::io::Write;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use crate::{
-	generate_target_times, helpers::{batch, InterpolationState}, splines::{cubic, cubic_simd, linear, linear_simd, polynomial, polynomial_simd, quadratic, quadratic_simd}, Error, Point, Resolution, Spline, POINT_SIZE
+	Error, POINT_SIZE, Point, Resolution, Spline, generate_target_times, helpers::{InterpolationState, batch}, splines::{cubic, cubic_simd, linear, linear_simd, polynomial, polynomial_simd, quadratic, quadratic_simd}
 };
 
 mod fast_path;
