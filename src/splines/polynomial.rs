@@ -1,13 +1,13 @@
 use std::io::Write;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use bigdecimal::{BigDecimal, FromPrimitive, One, ToPrimitive, Zero};
 use chrono::{DateTime, Utc};
 use wide::f64x4;
 
 use super::SIMD_BATCH_SIZE;
 use crate::{
-	Error, Point, Resolution, Spline, helpers::{InterpolationState, batch}
+	helpers::{batch, InterpolationState}, Error, Point, Resolution, Spline
 };
 
 pub async fn polynomial(points: &mut [Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: &Resolution, spline: &Spline) -> Result<Vec<Point>> {
@@ -174,13 +174,11 @@ fn evaluate_polynomial_simd_with_degree(points: &[Point], times: &[f64], values:
 	let n = points.len();
 	let num_points = degree + 1;
 
-	let (min_value, max_value, bounds_factor) = if let Some(f) = spline.bounds_factor() {
+	let (min_value, max_value, bounds_factor) = spline.bounds_factor().map_or((0.0, 0.0, None), |f| {
 		let min_v = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
 		let max_v = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 		(min_v, max_v, Some(f))
-	} else {
-		(0.0, 0.0, None) // Dummy values
-	};
+	});
 
 	for (lane, &target_time) in target_array.iter().enumerate() {
 		let nearest_idx = if target_time <= times[0] {
@@ -237,8 +235,8 @@ fn evaluate_polynomial_simd_with_degree(points: &[Point], times: &[f64], values:
 			let is_extrapolating = target_time < times[0] || target_time > times[times.len() - 1];
 			if is_extrapolating {
 				let range = max_value - min_value;
-				let lower_bound = min_value - range * f;
-				let upper_bound = max_value + range * f;
+				let lower_bound = range.mul_add(-f, min_value);
+				let upper_bound = range.mul_add(f, max_value);
 				results[lane] = results[lane].clamp(lower_bound, upper_bound);
 			}
 		}

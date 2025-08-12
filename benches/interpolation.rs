@@ -1,9 +1,9 @@
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Duration, Utc};
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use splimes::{Point, Resolution, Spline, auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate};
+use splimes::{auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate, Point, Resolution, Spline};
 
 // Helper function to generate test data
 fn generate_test_data(input_size: usize, start: DateTime<Utc>, _resolution: Resolution) -> (Vec<Point>, DateTime<Utc>, DateTime<Utc>) {
@@ -38,16 +38,20 @@ fn bench_interpolation(c: &mut Criterion) {
 
 		println!("Testing size: {} input, {} estimated output", size, estimated_output);
 
-		// Benchmark plain CPU
-		group.bench_with_input(BenchmarkId::new("CPU", format!("{size}_in_{estimated_output}_out")), &size, |b, &size| {
-			b.to_async(criterion::async_executor::FuturesExecutor).iter(|| {
-				let (mut points, bench_start, bench_end) = generate_test_data(size, start, resolution);
-				async move {
-					cpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
-					cpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
-				}
+		// Only benchmark CPU for smaller datasets (< 100K points)
+		// CPU becomes impractically slow for larger datasets (397s vs 2.37s for parallel at 1M points)
+		if size < 100_000 {
+			// Benchmark plain CPU
+			group.bench_with_input(BenchmarkId::new("CPU", format!("{size}_in_{estimated_output}_out")), &size, |b, &size| {
+				b.to_async(criterion::async_executor::FuturesExecutor).iter(|| {
+					let (mut points, bench_start, bench_end) = generate_test_data(size, start, resolution);
+					async move {
+						cpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
+						cpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
+					}
+				});
 			});
-		});
+		}
 
 		// Benchmark parallel
 		group.bench_with_input(BenchmarkId::new("Parallel", format!("{size}_in_{estimated_output}_out")), &size, |b, &size| {

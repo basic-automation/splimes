@@ -1,44 +1,29 @@
 use std::io::Write;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use crate::{
-	Error, POINT_SIZE, Point, Resolution, Spline, generate_target_times, helpers::{InterpolationState, batch}, splines::{cubic, cubic_simd, linear, linear_simd, polynomial, polynomial_simd, quadratic, quadratic_simd}
+	generate_target_times, helpers::{batch, InterpolationState}, splines::{cubic, cubic_simd, linear, linear_simd, polynomial, polynomial_simd, quadratic, quadratic_simd}, Error, Point, Resolution, Spline, POINT_SIZE
 };
 
 mod fast_path;
 pub use fast_path::apply_fast_path; // Re-export apply_fast_path
 
-const SIMD_THRESHOLD: usize = 0; // Set to 0 based on benchmarks showing parallel is faster even for very small inputs (e.g., 10)
-const SIMD_THRESHOLD_PLUS_ONE: usize = SIMD_THRESHOLD + 1;
-
 /// # Errors
 /// todo
 pub async fn cpu_interpolate(points: &mut [Point], start: DateTime<Utc>, end: DateTime<Utc>, resolution: Resolution, spline: Spline) -> Result<Vec<Point>> {
-	let input_count = points.len();
-	let target_times = generate_target_times(start, end, resolution);
-	let output_count = target_times.len();
+	let _input_count = points.len();
+	let _target_times = generate_target_times(start, end, resolution);
+	let _output_count = _target_times.len();
 
 	match spline {
-		Spline::Linear => match (input_count, output_count) {
-			(input, output) if input < SIMD_THRESHOLD && output < SIMD_THRESHOLD_PLUS_ONE => linear(points, &start, &end, &resolution).await,
-			_ => parallel_interpolate(points, &start, &end, spline, resolution).await,
-		},
-		Spline::Quadratic => match (input_count, output_count) {
-			(input, output) if input < SIMD_THRESHOLD && output < SIMD_THRESHOLD_PLUS_ONE => quadratic(points, &start, &end, &resolution).await,
-			_ => parallel_interpolate(points, &start, &end, spline, resolution).await,
-		},
-		Spline::Cubic => match (input_count, output_count) {
-			(input, output) if input < SIMD_THRESHOLD && output < SIMD_THRESHOLD_PLUS_ONE => cubic(points, &start, &end, &resolution).await,
-			_ => parallel_interpolate(points, &start, &end, spline, resolution).await,
-		},
-		Spline::Polynomial(_, _) => match (input_count, output_count) {
-			(input, output) if input < SIMD_THRESHOLD && output < SIMD_THRESHOLD_PLUS_ONE => polynomial(points, &start, &end, &resolution, &spline).await,
-			_ => parallel_interpolate(points, &start, &end, spline, resolution).await,
-		},
+		Spline::Linear => linear(points, &start, &end, &resolution).await,
+		Spline::Quadratic => quadratic(points, &start, &end, &resolution).await,
+		Spline::Cubic => cubic(points, &start, &end, &resolution).await,
+		Spline::Polynomial(_, _) => polynomial(points, &start, &end, &resolution, &spline).await,
 	}
 }
 

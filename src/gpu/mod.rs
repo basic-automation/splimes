@@ -1,27 +1,36 @@
 use std::{
-	fs::File, io::{BufRead, BufReader, BufWriter, Write}
+	fs::File, io::{BufRead, BufWriter, Write}
 };
 
-use anyhow::bail;
-use bigdecimal::{BigDecimal, FromPrimitive};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-pub use helpers::get_max_buffer_size;
 use sysinfo::System;
 use tempfile::NamedTempFile;
-pub use types::{GpuInterpolator, Method};
 use wgpu::util::DeviceExt;
 
 use crate::{
-	Error, POINT_SIZE, Point, Resolution, Result, Spline, helpers::{InterpolationState, TargetTimesIterator, batch}
+	gpu::{types::GpuInterpolator, Method}, helpers::{batch, InterpolationState, TargetTimesIterator}, Error, Point, Resolution, Spline
 };
 
 mod helpers;
 mod shaders;
 mod types;
 
-const F64_SIZE: usize = std::mem::size_of::<f64>();
-const NUMBER_OF_BUFFERS: usize = 5;
+pub use helpers::*;
+pub use types::*;
 
+const F64_SIZE: usize = std::mem::size_of::<f64>();
+const NUMBER_OF_BUFFERS: usize = 4;
+
+/// Performs GPU-accelerated interpolation on data points
+///
+/// # Errors
+/// Returns an error if:
+/// - The spline fails validation checks
+/// - GPU device cannot be accessed or initialized
+/// - Memory allocation fails
+/// - GPU operations fail
+/// - Buffer operations fail
 pub async fn gpu_interpolate(points: &mut [Point], start: DateTime<Utc>, end: DateTime<Utc>, resolution: Resolution, spline: Spline) -> Result<Vec<Point>> {
 	spline.pre_check(points, &start, &end)?;
 	let method = match spline {
@@ -31,9 +40,22 @@ pub async fn gpu_interpolate(points: &mut [Point], start: DateTime<Utc>, end: Da
 		Spline::Polynomial(degree, _) => Method::Polynomial(points.len().min(degree + 1)),
 	};
 	// Use static method to check f64 support instead of creating new instance
-	if GpuInterpolator::supports_f64_static()? { gpu_interpolate_f64(points, &start, &end, &resolution, &method, &spline).await } else { batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await }
+	if GpuInterpolator::supports_f64_static()? {
+		gpu_interpolate_f64(points, &start, &end, &resolution, &method, &spline).await
+	} else {
+		batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await
+	}
 }
 
+/// Performs f32 GPU interpolation for batched processing
+///
+/// # Errors
+/// Returns an error if:
+/// - Input points or batch times are not provided
+/// - Memory allocation fails
+/// - GPU operations fail
+/// - Buffer size conversions fail
+/// - File I/O operations fail
 pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 	let Some(input_points) = &state.input_points else {
 		bail!("No input points provided for interpolation");
@@ -54,9 +76,9 @@ pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 	};
 
 	state.system.refresh_memory();
-	let available_memory = usize::try_from(state.system.available_memory())?;
+	let available_memory = usize::try_from(state.system.available_memory()).context("Failed to convert available memory to usize")?;
 	let batch_size = if available_memory < state.memory_threshold {
-		let max_points = (available_memory / POINT_SIZE).max(50);
+		let max_points = (available_memory / crate::POINT_SIZE).max(50);
 		batch_times.len().min(max_points / 2)
 	} else {
 		batch_times.len()
@@ -69,22 +91,23 @@ pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 	for batch in batch_times.chunks(batch_size) {
 		let target_times_array = helpers::convert_datetimes_to_gpu_format_f32(batch, state.resolution, input_points[0].timestamp)?;
 		let m_b = get_max_buffer_size().await?;
-		let m_b = usize::from_u64(m_b).ok_or_else(|| Error::ConversionError("Failed to convert buffer size to usize".to_string()))?;
+		let m_b = usize::try_from(m_b).context("Failed to convert buffer size to usize")?;
 		let max_single_buffer_size = m_b / NUMBER_OF_BUFFERS;
 		let max_targets_per_batch = (max_single_buffer_size / F64_SIZE).min(target_times_array.len());
 
 		for target_batch in target_times_array.chunks(max_targets_per_batch) {
 			let (input_times, input_values) = helpers::convert_points_to_gpu_format_f32(input_points, state.resolution)?;
 			let config = match method {
-				Method::Linear => [time_offset as u32, 1, 0, 0],
-				Method::Quadratic => [time_offset as u32, 2, 0, 0],
-				Method::Cubic => [time_offset as u32, 3, 0, 0],
+				Method::Linear => [u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, 1, 0, 0],
+				Method::Quadratic => [u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, 2, 0, 0],
+				Method::Cubic => [u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, 3, 0, 0],
 				Method::Polynomial(degree) => {
+					#[allow(clippy::cast_possible_truncation)] // f64 to f32 conversion for GPU compatibility
 					let bounds_factor = match state.spline {
 						Spline::Polynomial(_, Some(factor)) => factor as f32,
 						_ => f32::NAN,
 					};
-					[time_offset as u32, degree as u32, bounds_factor.to_bits(), 0]
+					[u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, u32::try_from(degree).context("degree exceeds u32 limit")?, bounds_factor.to_bits(), 0]
 				}
 			};
 			// Use static method instead of instance method - convert config to bytes
@@ -104,17 +127,24 @@ pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 	} else if let Some(writer_mutex) = &state.temp_file {
 		let mut writer = writer_mutex.lock().await;
 		for point in &b {
-			writeln!(writer, "{},{}", point.timestamp.timestamp_millis(), point.value)?;
+			writeln!(writer, "{},{}", point.timestamp.to_rfc3339(), point.value)?;
 		}
 		writer.flush().map_err(|e| Error::IOError(e.to_string()))?;
-	} else if !b.is_empty() {
-		bail!("No output destination available");
 	}
-
 	Ok(())
 }
 
 // Remove the interpolator parameter since we're using the static global one
+/// Performs f64 GPU interpolation for high-precision operations
+///
+/// # Errors
+/// Returns an error if:
+/// - Insufficient points for interpolation (< 2)
+/// - Invalid time range (start >= end)
+/// - Memory threshold calculations fail
+/// - GPU operations fail
+/// - Buffer operations fail
+/// - File I/O operations fail
 pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: &Resolution, method: &Method, spline: &Spline) -> Result<Vec<Point>> {
 	if points.len() < 2 {
 		bail!("Insufficient points for interpolation");
@@ -129,8 +159,11 @@ pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &
 	let mut temp_path: Option<tempfile::TempPath> = None;
 
 	let total_memory = system.total_memory();
-	let t_m = f64::from_u64(total_memory).ok_or_else(|| Error::ConversionError("Failed to convert total memory to f64".to_string()))?;
-	let memory_threshold = u64::from_f64(t_m * 0.8).ok_or_else(|| Error::ConversionError("Failed to convert memory threshold to u64".to_string()))?;
+	// For memory calculations, we need to use direct casting with proper bounds checking
+	#[allow(clippy::cast_precision_loss)] // Memory calculations can safely lose precision for threshold purposes
+	let t_m = total_memory as f64;
+	#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Memory threshold calculation - safe for positive values
+	let memory_threshold = (t_m * 0.8) as u64;
 	let point_size = std::mem::size_of::<Point>() as u64;
 
 	let element_size = F64_SIZE;
@@ -142,7 +175,7 @@ pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &
 	let time_iter = TargetTimesIterator::new(rounded_start, rounded_end, *resolution);
 	if let Ok(estimated_points) = time_iter.estimate_len() {
 		system.refresh_memory();
-		let estimated_memory = estimated_points as u64 * point_size;
+		let estimated_memory = u64::try_from(estimated_points).context("Failed to convert estimated_points to u64")? * point_size;
 		if estimated_memory > memory_threshold {
 			let temp = NamedTempFile::new().map_err(|e| Error::IOError(e.to_string()))?;
 			let (file, path) = temp.into_parts();
@@ -158,22 +191,26 @@ pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &
 
 		let target_times_array = helpers::convert_datetimes_to_gpu_format_f64(&batch_times, *resolution, base_time)?;
 		let max_buffer_size = get_max_buffer_size().await?;
-		let max_buffer_size_usize = usize::try_from(max_buffer_size)?;
+		let max_buffer_size_usize = usize::try_from(max_buffer_size).context("Failed to convert max_buffer_size to usize")?;
 		let max_single_buffer_size = max_buffer_size_usize / NUMBER_OF_BUFFERS;
 		let max_targets_per_batch = (max_single_buffer_size / element_size).min(target_times_array.len());
 
 		let mut time_offset = 0usize;
 		for target_batch in target_times_array.chunks(max_targets_per_batch) {
 			let config = match method {
-				Method::Linear => [time_offset as u32, 1, 0, 0],
-				Method::Quadratic => [time_offset as u32, 2, 0, 0],
-				Method::Cubic => [time_offset as u32, 3, 0, 0],
+				Method::Linear => [u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, 1, 0, 0],
+				Method::Quadratic => [u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, 2, 0, 0],
+				Method::Cubic => [u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, 3, 0, 0],
 				Method::Polynomial(degree) => {
 					let bounds_factor = match spline {
 						Spline::Polynomial(_, Some(factor)) => *factor,
 						_ => f64::NAN,
 					};
-					[time_offset as u32, *degree as u32, bounds_factor.to_bits() as u32, 0]
+					// Split the f64 bits into two u32 parts for the shader
+					let bits = bounds_factor.to_bits();
+					let bounds_factor_bits_low = u32::try_from(bits & 0xFFFF_FFFF).context("bounds_factor low bits exceed u32 limit")?;
+					let bounds_factor_bits_high = u32::try_from(bits >> 32).context("bounds_factor high bits exceed u32 limit")?;
+					[u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, u32::try_from(*degree).context("degree exceeds u32 limit")?, bounds_factor_bits_low, bounds_factor_bits_high]
 				}
 			};
 			// Use static method instead of instance method - convert config to bytes
@@ -195,20 +232,28 @@ pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &
 		}
 	}
 
-	if let Some(path) = &temp_path {
-		drop(temp_file);
-		let file = std::fs::File::open(path).map_err(|e| Error::IOError(e.to_string()))?;
-		let reader = BufReader::new(file);
+	if let Some(mut writer) = temp_file {
+		writer.flush().map_err(|e| Error::IOError(e.to_string()))?;
+	}
+
+	if let Some(temp_path) = temp_path {
+		// Read back the results from temp file
+		let file = std::fs::File::open(&temp_path).map_err(|e| Error::IOError(e.to_string()))?;
+		let reader = std::io::BufReader::new(file);
 		for line in reader.lines() {
 			let line = line.map_err(|e| Error::IOError(e.to_string()))?;
 			let parts: Vec<&str> = line.split(',').collect();
 			if parts.len() == 2 {
-				let timestamp = parts[0].parse::<i64>().map_err(|e| Error::ConversionError(e.to_string()))?;
-				let value = BigDecimal::from_f64(parts[1].parse::<f64>().map_err(|e| Error::ConversionError(e.to_string()))?).ok_or_else(|| Error::ConversionError("Failed to convert to BigDecimal".to_string()))?;
-				result.push(Point { timestamp: DateTime::from_timestamp_millis(timestamp).ok_or_else(|| Error::ConversionError("Invalid timestamp".to_string()))?, value });
+				let timestamp_millis = parts[0].parse::<i64>().map_err(|e| Error::IOError(e.to_string()))?;
+				let timestamp = DateTime::from_timestamp_millis(timestamp_millis).ok_or_else(|| Error::IOError("Invalid timestamp".to_string()))?.with_timezone(&chrono::Utc);
+				let value_f64 = parts[1].parse::<f64>().map_err(|e| Error::IOError(e.to_string()))?;
+				let value = bigdecimal::BigDecimal::try_from(value_f64).map_err(|e| Error::IOError(e.to_string()))?;
+				result.push(Point { timestamp, value });
 			}
 		}
+		std::fs::remove_file(temp_path).unwrap_or(());
 	}
 
+	result.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 	Ok(result)
 }

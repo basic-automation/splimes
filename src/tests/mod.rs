@@ -5,4 +5,4 @@ pub mod polynomial;
 pub mod quadratic;
 
 #[cfg(test)]
-pub use plot::test::plot_terminal;
+pub use plot::plot::plot_terminal;

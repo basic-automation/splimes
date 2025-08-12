@@ -3,7 +3,7 @@
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
-use helpers::should_use_gpu;
+use helpers::{InterpolationStrategy, should_use_gpu};
 pub use optimizations::{apply_fast_path, cpu_interpolate, parallel_interpolate};
 pub use types::{BASE_BATCH_SIZE, Error, POINT_SIZE, Point, Resolution, Spline};
 
@@ -44,29 +44,31 @@ pub async fn auto_interpolate(points: &mut [Point], start: DateTime<Utc>, end: D
 	let estimated_output_points = estimate_output_points(start, end, resolution);
 	let spline = apply_fast_path(spline, points.len());
 
-	// Based on benchmark results:
-	// - GPU has ~800ms overhead, unsuitable for datasets we've tested
-	// - Parallel is fastest for medium to large datasets (500+ inputs)
-	// - For very small datasets, there might be some overhead in parallel setup
-
-	let use_gpu = should_use_gpu(points.len(), estimated_output_points);
-
-	if use_gpu {
-		// Try GPU interpolation with fallback
-		if let Ok(result) = gpu_interpolate(points, start, end, resolution, spline).await {
-			return Ok(result);
+	// Use centralized strategy selection based on benchmark results
+	match should_use_gpu(points.len(), estimated_output_points) {
+		InterpolationStrategy::GpuPrimary => {
+			// Try GPU first for very large datasets where it's proven to be faster
+			if let Ok(result) = gpu_interpolate(points, start, end, resolution, spline).await {
+				return Ok(result);
+			}
+			// If GPU fails, fall back to parallel (still better than CPU for large datasets)
+			parallel_interpolate(points, &start, &end, spline, resolution).await
 		}
-		// If GPU fails, fall through to CPU strategies
-	}
-
-	// For small datasets (< 100 inputs), the overhead of parallel processing
-	// might not be worth it based on auto performance regression for small sizes
-	// For larger datasets, parallel is clearly superior
-	if points.len() >= 100 || estimated_output_points >= 100 {
-		// Use parallel for medium to large datasets where it's clearly faster
-		parallel_interpolate(points, &start, &end, spline, resolution).await
-	} else {
-		// Use CPU strategies for very small datasets to avoid parallel overhead
-		cpu_interpolate(points, start, end, resolution, spline).await
+		InterpolationStrategy::GpuThenParallel => {
+			// Try GPU first, but with quick fallback to parallel
+			if let Ok(result) = gpu_interpolate(points, start, end, resolution, spline).await {
+				return Ok(result);
+			}
+			// Fall back to parallel for large datasets
+			parallel_interpolate(points, &start, &end, spline, resolution).await
+		}
+		InterpolationStrategy::Parallel => {
+			// For medium datasets, parallel is clearly optimal
+			parallel_interpolate(points, &start, &end, spline, resolution).await
+		}
+		InterpolationStrategy::Cpu => {
+			// For small datasets, use CPU to avoid parallel overhead
+			cpu_interpolate(points, start, end, resolution, spline).await
+		}
 	}
 }

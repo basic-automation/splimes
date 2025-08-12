@@ -1,11 +1,14 @@
-pub mod test {
-	use std::io;
+use std::io;
 
-	use bigdecimal::ToPrimitive;
+use bigdecimal::ToPrimitive;
 
-	use crate::Point;
+use crate::Point;
 
-	#[allow(dead_code)]
+pub mod plot {
+	use super::{io, Point, ToPrimitive};
+
+	#[allow(dead_code)] // This function is used in tests but may not be called during normal clippy runs
+	#[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
 	pub fn plot_terminal(title: &str, points: Vec<Point>) -> io::Result<()> {
 		if points.is_empty() {
 			return Ok(());
@@ -30,13 +33,19 @@ pub mod test {
 
 		// Render chart lines
 		for row in 0..chart_height {
+			// Fix casting issue
+			#[allow(clippy::cast_precision_loss)]
 			let y_threshold = max_y - (range * row as f64 / chart_height as f64);
 			let mut line = String::new();
 
 			// Sample data points to fit chart width
+			// Fix casting issue
+			#[allow(clippy::cast_precision_loss)]
 			let step = if data.len() > chart_width.saturating_sub(2) { data.len() as f64 / (chart_width.saturating_sub(2)) as f64 } else { 1.0 };
 
 			for i in 0..(chart_width.saturating_sub(2)) {
+				// Fix casting issue
+				#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
 				let data_index = (i as f64 * step) as usize;
 				if data_index < data.len() {
 					let value = data[data_index];
@@ -50,7 +59,8 @@ pub mod test {
 				}
 			}
 
-			println!("│{}│", line);
+			// Fix format string
+			println!("│{line}│");
 		}
 
 		println!("└{}┘", "─".repeat(chart_width.saturating_sub(2)));
