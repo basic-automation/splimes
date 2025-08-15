@@ -5,7 +5,7 @@ use bigdecimal::ToPrimitive;
 use crate::Point;
 
 pub mod plot {
-	use super::{io, Point, ToPrimitive};
+	use super::{Point, ToPrimitive, io};
 
 	#[allow(dead_code)] // This function is used in tests but may not be called during normal clippy runs
 	#[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]

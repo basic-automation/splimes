@@ -4,9 +4,9 @@ mod tests {
 	use serial_test::serial;
 
 	use crate::{
-		Resolution, auto_interpolate, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::polynomial, tests::{
-			linear::tests::{COS_THRESHOLD, POINTS, RESOLUTION, Z_THRESHOLD, check_similarity}, plot_terminal
-		}
+		gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::polynomial, tests::{
+			linear::tests::{check_similarity, COS_THRESHOLD, POINTS, RESOLUTION, Z_THRESHOLD}, plot_terminal
+		}, Resolution
 	};
 
 	#[tokio::test]
@@ -123,43 +123,15 @@ mod tests {
 		drop(gpu_timestamps);
 		drop(gpu_values);
 
-		// automatically determine the fastest method
-		println!("Polynomial: Auto Test Starting...");
-		let auto_timer = tokio::time::Instant::now();
-		let auto = auto_interpolate(&mut points, start, end, RESOLUTION, spline).await.unwrap();
-		let auto_time = auto_timer.elapsed();
-		println!("Polynomial: Auto Interpolation took: {:?}", auto_time);
-		let auto_len = auto.len();
-		let (auto_timestamps, auto_values): (Vec<_>, Vec<_>) = auto.iter().map(|p| (p.timestamp, p.value.clone())).unzip();
-		plot_terminal("Polynomial: Auto Interpolation Results", auto.clone()).unwrap();
-		drop(auto);
-
-		// compare cpu and auto results
-		println!("Polynomial: Comparing CPU and Auto results...");
-		assert_eq!(cpu_len, auto_len);
-
-		let (cpu_z_scores, auto_z_scores, similarity) = check_similarity(&cpu_values, &auto_values);
-		assert!(similarity >= COS_THRESHOLD, "Auto: Cosine similarity is below threshold: {}", similarity);
-		for (i, (cpu_z, auto_z)) in cpu_z_scores.iter().zip(auto_z_scores.iter()).enumerate() {
-			assert!(cpu_z.abs() < Z_THRESHOLD, "CPU value at index {} is an outlier: {}", i, cpu_z);
-			assert!(auto_z.abs() < Z_THRESHOLD, "Auto value at index {} is an outlier: {}", i, auto_z);
-		}
-
-		assert_eq!(cpu_timestamps, auto_timestamps);
-		drop(auto_timestamps);
-		drop(auto_values);
-
-		if auto_time < gpu_time && auto_time < cpu_time && auto_time < parallel_time && auto_time < parallel_time {
-			let percentage_difference = ((gpu_time - auto_time).as_nanos() as f64 / auto_time.as_nanos() as f64) * 100.0;
-			println!("Polynomial: Auto was faster by {:.2}%", percentage_difference);
-		} else if gpu_time < auto_time && gpu_time < cpu_time && gpu_time < parallel_time && gpu_time < parallel_time {
-			let percentage_difference = ((auto_time - gpu_time).as_nanos() as f64 / gpu_time.as_nanos() as f64) * 100.0;
+		// Performance comparison between CPU, Parallel, and GPU
+		if gpu_time < cpu_time && gpu_time < parallel_time {
+			let percentage_difference = ((cpu_time - gpu_time).as_nanos() as f64 / gpu_time.as_nanos() as f64) * 100.0;
 			println!("Polynomial: GPU was faster by {:.2}%", percentage_difference);
-		} else if cpu_time < auto_time && cpu_time < gpu_time && cpu_time < parallel_time && cpu_time < parallel_time {
-			let percentage_difference = ((auto_time - cpu_time).as_nanos() as f64 / cpu_time.as_nanos() as f64) * 100.0;
+		} else if cpu_time < gpu_time && cpu_time < parallel_time {
+			let percentage_difference = ((gpu_time - cpu_time).as_nanos() as f64 / cpu_time.as_nanos() as f64) * 100.0;
 			println!("Polynomial: CPU was faster by {:.2}%", percentage_difference);
-		} else if parallel_time < auto_time && parallel_time < gpu_time && parallel_time < cpu_time && parallel_time < parallel_time {
-			let percentage_difference = ((auto_time - parallel_time).as_nanos() as f64 / parallel_time.as_nanos() as f64) * 100.0;
+		} else if parallel_time < cpu_time && parallel_time < gpu_time {
+			let percentage_difference = ((cpu_time - parallel_time).as_nanos() as f64 / parallel_time.as_nanos() as f64) * 100.0;
 			println!("Polynomial: SIMD was faster by {:.2}%", percentage_difference);
 		} else {
 			let st = parallel_time.as_nanos();

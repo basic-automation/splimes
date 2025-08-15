@@ -27,6 +27,37 @@ pub struct InterpolationState {
 	pub spline: Spline,
 }
 
+/// Processes interpolation in batches with memory management and optional file-based storage
+///
+/// This function handles large datasets by processing them in manageable chunks, automatically
+/// switching between in-memory and file-based storage based on memory availability.
+///
+/// # Arguments
+/// * `points` - Input data points for interpolation (will be sorted by timestamp)
+/// * `start` - Start time for interpolation range (will be rounded to resolution)
+/// * `end` - End time for interpolation range (will be rounded to resolution)
+/// * `spline` - Spline type to use for interpolation
+/// * `resolution` - Time resolution for target points
+/// * `f` - Interpolation function to apply to each batch
+///
+/// # Returns
+/// Vector of interpolated points covering the specified time range
+///
+/// # Errors
+/// Returns an error if:
+/// - Time resolution rounding fails
+/// - Memory threshold calculations fail
+/// - Temporary file creation fails (when memory threshold exceeded)
+/// - Interpolation function `f` returns an error
+/// - File I/O operations fail during batch processing
+/// - Target time generation fails
+/// - Result consolidation from temporary files fails
+/// - Batch times are empty when they shouldn't be
+///
+/// # Panics
+/// Panics if:
+/// - `batch_times.first()` is called on an empty batch (should not occur due to iterator design)
+/// - Memory conversion operations fail unexpectedly
 pub async fn batch<F>(points: &mut [Point], start: &DateTime<Utc>, end: &DateTime<Utc>, spline: &Spline, resolution: &Resolution, f: F) -> Result<Vec<Point>>
 where
 	F: for<'a> Fn(&'a mut InterpolationState) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> + Send + Sync,
@@ -61,8 +92,8 @@ where
 				continue;
 			}
 
-			let batch_start = batch_times.first().unwrap();
-			let batch_end = batch_times.last().unwrap();
+			let batch_start = batch_times.first().ok_or_else(|| Error::ConversionError("Empty batch times".to_string()))?;
+			let batch_end = batch_times.last().ok_or_else(|| Error::ConversionError("Empty batch times".to_string()))?;
 
 			let start_idx = sorted_points.iter().position(|p| p.timestamp <= *batch_start).unwrap_or(0);
 			let end_idx = sorted_points.iter().rposition(|p| p.timestamp >= *batch_end).unwrap_or(sorted_points.len() - 1);
@@ -78,7 +109,7 @@ where
 
 			f(&mut state).await.inspect_err(|_| {
 				if let Some(ref temp_path) = state.temp_path {
-					std::fs::remove_file(temp_path).unwrap_or(());
+					let _ = std::fs::remove_file(temp_path);
 				}
 			})?;
 
@@ -99,11 +130,11 @@ where
 				if parts.len() == 2 {
 					let timestamp = DateTime::parse_from_rfc3339(parts[0]).map_err(|e| Error::IOError(e.to_string()))?.with_timezone(&Utc);
 					let value_f64 = parts[1].parse::<f64>().map_err(|e| Error::IOError(e.to_string()))?;
-					let value = bigdecimal::BigDecimal::from_f64(value_f64).unwrap_or_default();
+					let value = bigdecimal::BigDecimal::from_f64(value_f64).ok_or_else(|| Error::ConversionError("Failed to convert f64 to BigDecimal".to_string()))?;
 					result.push(Point { timestamp, value });
 				}
 			}
-			std::fs::remove_file(temp_path).unwrap_or(());
+			let _ = std::fs::remove_file(temp_path);
 		}
 	} else {
 		// In-memory processing for smaller datasets
@@ -114,8 +145,8 @@ where
 				continue;
 			}
 
-			let batch_start = batch_times.first().unwrap();
-			let batch_end = batch_times.last().unwrap();
+			let batch_start = batch_times.first().ok_or_else(|| Error::ConversionError("Empty batch times".to_string()))?;
+			let batch_end = batch_times.last().ok_or_else(|| Error::ConversionError("Empty batch times".to_string()))?;
 
 			let start_idx = sorted_points.iter().position(|p| p.timestamp <= *batch_start).unwrap_or(0);
 			let end_idx = sorted_points.iter().rposition(|p| p.timestamp >= *batch_end).unwrap_or(sorted_points.len() - 1);
@@ -131,7 +162,7 @@ where
 
 			f(&mut state).await.inspect_err(|_| {
 				if let Some(ref temp_path) = state.temp_path {
-					std::fs::remove_file(temp_path).unwrap_or(());
+					let _ = std::fs::remove_file(temp_path);
 				}
 			})?;
 

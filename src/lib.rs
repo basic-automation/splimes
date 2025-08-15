@@ -1,14 +1,13 @@
 #![warn(clippy::pedantic, clippy::nursery, clippy::all)]
 #![allow(clippy::multiple_crate_versions, clippy::used_underscore_binding, clippy::similar_names, clippy::module_name_repetitions, clippy::module_inception)]
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use helpers::{InterpolationStrategy, should_use_gpu};
 pub use optimizations::{apply_fast_path, cpu_interpolate, parallel_interpolate};
-pub use types::{BASE_BATCH_SIZE, Error, POINT_SIZE, Point, Resolution, Spline};
+pub use types::{Error, Point, Resolution, Spline, BASE_BATCH_SIZE, POINT_SIZE};
 
 mod gpu;
-mod helpers;
+pub mod helpers; // Make helpers public to allow access to helpers::should_use_gpu
 mod optimizations;
 mod splines;
 mod tests;
@@ -16,7 +15,7 @@ mod types;
 
 // Re-export for public API
 pub use gpu::gpu_interpolate;
-pub use helpers::{estimate_output_points, generate_target_times};
+pub use helpers::{estimate_output_points, generate_target_times, should_use_gpu, InterpolationStrategy};
 pub use splines::{DAYS_IN_MONTH, DAYS_IN_YEAR, SECONDS_IN_DAY, SECONDS_IN_HOUR, SECONDS_IN_MINUTE, SECONDS_IN_MONTH, SECONDS_IN_WEEK, SECONDS_IN_YEAR};
 
 /// Main async interpolation function with GPU acceleration support
@@ -41,33 +40,37 @@ pub async fn auto_interpolate(points: &mut [Point], start: DateTime<Utc>, end: D
 		bail!(Error::InvalidTimeRangeError);
 	}
 
-	let estimated_output_points = estimate_output_points(start, end, resolution);
+	let estimated_output_points = helpers::estimate_output_points(start, end, resolution);
 	let spline = apply_fast_path(spline, points.len());
 
 	// Use centralized strategy selection based on benchmark results
-	match should_use_gpu(points.len(), estimated_output_points) {
-		InterpolationStrategy::GpuPrimary => {
+	match helpers::should_use_gpu(points.len(), estimated_output_points) {
+		helpers::InterpolationStrategy::GpuPrimary => {
 			// Try GPU first for very large datasets where it's proven to be faster
 			if let Ok(result) = gpu_interpolate(points, start, end, resolution, spline).await {
 				return Ok(result);
 			}
-			// If GPU fails, fall back to parallel (still better than CPU for large datasets)
+			// Fallback to parallel if GPU fails
 			parallel_interpolate(points, &start, &end, spline, resolution).await
 		}
-		InterpolationStrategy::GpuThenParallel => {
-			// Try GPU first, but with quick fallback to parallel
-			if let Ok(result) = gpu_interpolate(points, start, end, resolution, spline).await {
-				return Ok(result);
+		helpers::InterpolationStrategy::GpuThenParallel => {
+			// Try GPU with timeout for large datasets where it's competitive
+			let gpu_result = tokio::time::timeout(std::time::Duration::from_secs(10), gpu_interpolate(points, start, end, resolution, spline)).await;
+
+			match gpu_result {
+				Ok(Ok(result)) => Ok(result),
+				_ => {
+					// Quick fallback to parallel
+					parallel_interpolate(points, &start, &end, spline, resolution).await
+				}
 			}
-			// Fall back to parallel for large datasets
+		}
+		helpers::InterpolationStrategy::Parallel => {
+			// Use parallel for medium-sized datasets
 			parallel_interpolate(points, &start, &end, spline, resolution).await
 		}
-		InterpolationStrategy::Parallel => {
-			// For medium datasets, parallel is clearly optimal
-			parallel_interpolate(points, &start, &end, spline, resolution).await
-		}
-		InterpolationStrategy::Cpu => {
-			// For small datasets, use CPU to avoid parallel overhead
+		helpers::InterpolationStrategy::Cpu => {
+			// Use CPU for small datasets to avoid overhead
 			cpu_interpolate(points, start, end, resolution, spline).await
 		}
 	}

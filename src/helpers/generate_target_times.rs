@@ -69,11 +69,7 @@ impl TargetTimesIterator {
 			self.current += self.resolution.to_step();
 		}
 
-		if batch.is_empty() {
-			None
-		} else {
-			Some(batch)
-		}
+		if batch.is_empty() { None } else { Some(batch) }
 	}
 }
 

@@ -2,14 +2,14 @@ use std::{
 	fs::File, io::{BufRead, BufWriter, Write}
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sysinfo::System;
 use tempfile::NamedTempFile;
 use wgpu::util::DeviceExt;
 
 use crate::{
-	gpu::{types::GpuInterpolator, Method}, helpers::{batch, InterpolationState, TargetTimesIterator}, Error, Point, Resolution, Spline
+	Error, Point, Resolution, Spline, gpu::{Method, types::GpuInterpolator}, helpers::{InterpolationState, TargetTimesIterator, batch}
 };
 
 mod helpers;
@@ -40,11 +40,7 @@ pub async fn gpu_interpolate(points: &mut [Point], start: DateTime<Utc>, end: Da
 		Spline::Polynomial(degree, _) => Method::Polynomial(points.len().min(degree + 1)),
 	};
 	// Use static method to check f64 support instead of creating new instance
-	if GpuInterpolator::supports_f64_static()? {
-		gpu_interpolate_f64(points, &start, &end, &resolution, &method, &spline).await
-	} else {
-		batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await
-	}
+	if GpuInterpolator::supports_f64_static()? { gpu_interpolate_f64(points, &start, &end, &resolution, &method, &spline).await } else { batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await }
 }
 
 /// Performs f32 GPU interpolation for batched processing
