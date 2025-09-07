@@ -4,11 +4,19 @@ use bigdecimal::{BigDecimal, FromPrimitive};
 use chrono::{DateTime, Duration, Utc};
 use fake::{Dummy, Fake, Faker};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Point {
 	pub timestamp: DateTime<Utc>,
 	pub value: BigDecimal,
+}
+
+impl Point {
+	#[must_use]
+	pub const fn new(timestamp: DateTime<Utc>, value: BigDecimal) -> Self {
+		Self { timestamp, value }
+	}
 }
 
 impl Dummy<Faker> for Point {

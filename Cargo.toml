@@ -22,6 +22,7 @@ tempfile = { workspace = true }
 futures = { workspace = true }
 fake = { workspace = true, features = ["derive", "bigdecimal", "chrono"] }
 rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_futures"] }

@@ -4,9 +4,9 @@ mod tests {
 	use serial_test::serial;
 
 	use crate::{
-		gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::polynomial, tests::{
-			linear::tests::{check_similarity, COS_THRESHOLD, POINTS, RESOLUTION, Z_THRESHOLD}, plot_terminal
-		}, Resolution
+		Resolution, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::polynomial, tests::{
+			linear::tests::{COS_THRESHOLD, POINTS, RESOLUTION, Z_THRESHOLD, check_similarity}, plot_terminal
+		}
 	};
 
 	#[tokio::test]

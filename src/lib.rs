@@ -1,10 +1,10 @@
 #![warn(clippy::pedantic, clippy::nursery, clippy::all)]
 #![allow(clippy::multiple_crate_versions, clippy::used_underscore_binding, clippy::similar_names, clippy::module_name_repetitions, clippy::module_inception)]
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 pub use optimizations::{apply_fast_path, cpu_interpolate, parallel_interpolate};
-pub use types::{Error, Point, Resolution, Spline, BASE_BATCH_SIZE, POINT_SIZE};
+pub use types::{BASE_BATCH_SIZE, Error, POINT_SIZE, Point, Resolution, Spline};
 
 mod gpu;
 pub mod helpers; // Make helpers public to allow access to helpers::should_use_gpu
@@ -15,7 +15,7 @@ mod types;
 
 // Re-export for public API
 pub use gpu::gpu_interpolate;
-pub use helpers::{estimate_output_points, generate_target_times, should_use_gpu, InterpolationStrategy};
+pub use helpers::{InterpolationStrategy, estimate_output_points, generate_target_times, should_use_gpu};
 pub use splines::{DAYS_IN_MONTH, DAYS_IN_YEAR, SECONDS_IN_DAY, SECONDS_IN_HOUR, SECONDS_IN_MINUTE, SECONDS_IN_MONTH, SECONDS_IN_WEEK, SECONDS_IN_YEAR};
 
 /// Main async interpolation function with GPU acceleration support
