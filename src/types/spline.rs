@@ -1,9 +1,10 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::Point;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Spline {
 	Linear,
 	Quadratic,
