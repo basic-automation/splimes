@@ -14,12 +14,11 @@ mod tests {
 	async fn test_polynomial_interpolation() {
 		let mut points = POINTS.clone();
 		let start = {
-			let s = points.first().map_or_else(|| Utc::now(), |p| p.timestamp);
+			let s = points.first().map_or_else(Utc::now, |p| p.timestamp);
 			match RESOLUTION {
 				Resolution::Nanoseconds => s - chrono::Duration::nanoseconds(10),
 				Resolution::Microseconds => s - chrono::Duration::microseconds(10),
-				Resolution::Milliseconds => s - chrono::Duration::seconds(10),
-				Resolution::Seconds => s - chrono::Duration::seconds(10),
+				Resolution::Milliseconds | Resolution::Seconds => s - chrono::Duration::seconds(10),
 				Resolution::Minutes => s - chrono::Duration::minutes(10),
 				Resolution::Hours => s - chrono::Duration::hours(10),
 				Resolution::Days => s - chrono::Duration::days(10),
@@ -30,12 +29,11 @@ mod tests {
 		};
 
 		let end = {
-			let e = points.last().map_or_else(|| Utc::now(), |p| p.timestamp);
+			let e = points.last().map_or_else(Utc::now, |p| p.timestamp);
 			match RESOLUTION {
 				Resolution::Nanoseconds => e + chrono::Duration::nanoseconds(10),
 				Resolution::Microseconds => e + chrono::Duration::microseconds(10),
-				Resolution::Milliseconds => e + chrono::Duration::seconds(10),
-				Resolution::Seconds => e + chrono::Duration::seconds(10),
+				Resolution::Milliseconds | Resolution::Seconds => e + chrono::Duration::seconds(10),
 				Resolution::Minutes => e + chrono::Duration::minutes(10),
 				Resolution::Hours => e + chrono::Duration::hours(10),
 				Resolution::Days => e + chrono::Duration::days(10),
@@ -49,14 +47,14 @@ mod tests {
 		let target_times_iter = TargetTimesIterator::new(start, end, RESOLUTION);
 		let input_count = points.len();
 		let output_count = target_times_iter.estimate_len().unwrap();
-		println!("Polynomial: Input count: {}, Output count: {}", input_count, output_count);
+		println!("Polynomial: Input count: {input_count}, Output count: {output_count}");
 
 		// cpu interpolation
 		println!("Polynomial: CPU Test Starting...");
 		let timer = tokio::time::Instant::now();
 		let cpu = polynomial(&mut points, &start, &end, &RESOLUTION, &spline).await.unwrap();
 		let cpu_time = timer.elapsed();
-		println!("Polynomial: CPU Interpolation took: {:?}", cpu_time);
+		println!("Polynomial: CPU Interpolation took: {cpu_time:?}");
 		let cpu_len = cpu.len();
 		let (cpu_timestamps, cpu_values): (Vec<_>, Vec<_>) = cpu.iter().map(|p| (p.timestamp, p.value.clone())).unzip();
 		plot_terminal("Polynomial: CPU Interpolation Results", cpu.clone()).unwrap();
@@ -68,7 +66,7 @@ mod tests {
 		let timer = tokio::time::Instant::now();
 		let parallel = parallel_interpolate(&mut points, &start, &end, spline, RESOLUTION).await.unwrap();
 		let parallel_time = timer.elapsed();
-		println!("Polynomial: Parallel Interpolation took: {:?}", parallel_time);
+		println!("Polynomial: Parallel Interpolation took: {parallel_time:?}");
 		let parallel_len = parallel.len();
 		let (parallel_timestamps, parallel_values): (Vec<_>, Vec<_>) = parallel.iter().map(|p| (p.timestamp, p.value.clone())).unzip();
 		plot_terminal("Polynomial: Parallel Interpolation Results", parallel.clone()).unwrap();
@@ -86,10 +84,10 @@ mod tests {
 		} else {
 			COS_THRESHOLD
 		};
-		assert!(similarity >= polynomial_threshold, "Parallel: Cosine similarity is below threshold: {}, similarity: {}", polynomial_threshold, similarity);
+		assert!(similarity >= polynomial_threshold, "Parallel: Cosine similarity is below threshold: {polynomial_threshold}, similarity: {similarity}");
 		for (i, (cpu_z, parallel_z)) in cpu_z_scores.iter().zip(parallel_z_scores.iter()).enumerate() {
-			assert!(cpu_z.abs() < Z_THRESHOLD, "CPU value at index {} is an outlier: {}", i, cpu_z);
-			assert!(parallel_z.abs() < Z_THRESHOLD, "Parallel value at index {} is an outlier: {}", i, parallel_z);
+			assert!(cpu_z.abs() < Z_THRESHOLD, "CPU value at index {i} is an outlier: {cpu_z}");
+			assert!(parallel_z.abs() < Z_THRESHOLD, "Parallel value at index {i} is an outlier: {parallel_z}");
 		}
 
 		assert_eq!(cpu_timestamps, parallel_timestamps);
@@ -101,7 +99,7 @@ mod tests {
 		let timer = tokio::time::Instant::now();
 		let gpu = gpu_interpolate(&mut points, start, end, RESOLUTION, spline).await.unwrap();
 		let gpu_time = timer.elapsed();
-		println!("Polynomial: GPU Interpolation took: {:?}", gpu_time);
+		println!("Polynomial: GPU Interpolation took: {gpu_time:?}");
 		let gpu_len = gpu.len();
 		let (gpu_timestamps, gpu_values): (Vec<_>, Vec<_>) = gpu.iter().map(|p| (p.timestamp, p.value.clone())).unzip();
 		plot_terminal("Polynomial: GPU Interpolation Results", gpu.clone()).unwrap();
@@ -113,10 +111,10 @@ mod tests {
 		assert_eq!(cpu_len, gpu_len);
 
 		let (cpu_z_scores, gpu_z_scores, similarity) = check_similarity(&cpu_values, &gpu_values);
-		assert!(similarity >= COS_THRESHOLD, "GPU: Cosine similarity is below threshold: {}", similarity);
+		assert!(similarity >= COS_THRESHOLD, "GPU: Cosine similarity is below threshold: {similarity}");
 		for (i, (cpu_z, gpu_z)) in cpu_z_scores.iter().zip(gpu_z_scores.iter()).enumerate() {
-			assert!(cpu_z.abs() < Z_THRESHOLD, "CPU value at index {} is an outlier: {}", i, cpu_z);
-			assert!(gpu_z.abs() < Z_THRESHOLD, "GPU value at index {} is an outlier: {}", i, gpu_z);
+			assert!(cpu_z.abs() < Z_THRESHOLD, "CPU value at index {i} is an outlier: {cpu_z}");
+			assert!(gpu_z.abs() < Z_THRESHOLD, "GPU value at index {i} is an outlier: {gpu_z}");
 		}
 
 		assert_eq!(cpu_timestamps, gpu_timestamps);
@@ -126,19 +124,19 @@ mod tests {
 		// Performance comparison between CPU, Parallel, and GPU
 		if gpu_time < cpu_time && gpu_time < parallel_time {
 			let percentage_difference = ((cpu_time - gpu_time).as_nanos() as f64 / gpu_time.as_nanos() as f64) * 100.0;
-			println!("Polynomial: GPU was faster by {:.2}%", percentage_difference);
+			println!("Polynomial: GPU was faster by {percentage_difference:.2}%");
 		} else if cpu_time < gpu_time && cpu_time < parallel_time {
 			let percentage_difference = ((gpu_time - cpu_time).as_nanos() as f64 / cpu_time.as_nanos() as f64) * 100.0;
-			println!("Polynomial: CPU was faster by {:.2}%", percentage_difference);
+			println!("Polynomial: CPU was faster by {percentage_difference:.2}%");
 		} else if parallel_time < cpu_time && parallel_time < gpu_time {
 			let percentage_difference = ((cpu_time - parallel_time).as_nanos() as f64 / parallel_time.as_nanos() as f64) * 100.0;
-			println!("Polynomial: SIMD was faster by {:.2}%", percentage_difference);
+			println!("Polynomial: SIMD was faster by {percentage_difference:.2}%");
 		} else {
 			let st = parallel_time.as_nanos();
 			let gt = gpu_time.as_nanos();
-			let dif = if st < gt { gt - st } else { st - gt };
+			let dif = gt.abs_diff(st);
 			let percentage_difference = (dif as f64 / gpu_time.as_nanos() as f64) * 100.0;
-			println!("Polynomial: Parallel SIMD was faster by {:.2}%", percentage_difference);
+			println!("Polynomial: Parallel SIMD was faster by {percentage_difference:.2}%");
 		}
 	}
 
@@ -146,12 +144,11 @@ mod tests {
 	async fn test_target_times() {
 		let points = POINTS.clone();
 		let start = {
-			let s = points.first().map_or_else(|| Utc::now(), |p| p.timestamp);
+			let s = points.first().map_or_else(Utc::now, |p| p.timestamp);
 			match RESOLUTION {
 				Resolution::Nanoseconds => s - chrono::Duration::nanoseconds(10),
 				Resolution::Microseconds => s - chrono::Duration::microseconds(10),
-				Resolution::Milliseconds => s - chrono::Duration::seconds(10),
-				Resolution::Seconds => s - chrono::Duration::seconds(10),
+				Resolution::Milliseconds | Resolution::Seconds => s - chrono::Duration::seconds(10),
 				Resolution::Minutes => s - chrono::Duration::minutes(10),
 				Resolution::Hours => s - chrono::Duration::hours(10),
 				Resolution::Days => s - chrono::Duration::days(10),
@@ -162,12 +159,11 @@ mod tests {
 		};
 
 		let end = {
-			let e = points.last().map_or_else(|| Utc::now(), |p| p.timestamp);
+			let e = points.last().map_or_else(Utc::now, |p| p.timestamp);
 			match RESOLUTION {
 				Resolution::Nanoseconds => e + chrono::Duration::nanoseconds(10),
 				Resolution::Microseconds => e + chrono::Duration::microseconds(10),
-				Resolution::Milliseconds => e + chrono::Duration::seconds(10),
-				Resolution::Seconds => e + chrono::Duration::seconds(10),
+				Resolution::Milliseconds | Resolution::Seconds => e + chrono::Duration::seconds(10),
 				Resolution::Minutes => e + chrono::Duration::minutes(10),
 				Resolution::Hours => e + chrono::Duration::hours(10),
 				Resolution::Days => e + chrono::Duration::days(10),
