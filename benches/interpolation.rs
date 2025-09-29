@@ -1,9 +1,10 @@
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Duration, Utc};
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use splimes::{Point, Resolution, Spline, auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate};
+use splimes::{auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate, Point, Resolution, Spline};
+use tokio::runtime::Runtime;
 
 // Helper function to generate test data
 fn generate_test_data(input_size: usize, start: DateTime<Utc>, _resolution: Resolution) -> (Vec<Point>, DateTime<Utc>, DateTime<Utc>) {
@@ -21,13 +22,16 @@ fn generate_test_data(input_size: usize, start: DateTime<Utc>, _resolution: Reso
 }
 
 fn bench_interpolation(c: &mut Criterion) {
-	let mut group = c.benchmark_group("Interpolation Strategies");
-	group.warm_up_time(std::time::Duration::from_secs(1));
-	group.measurement_time(std::time::Duration::from_secs(5));
-	group.sample_size(10); // Fewer samples for faster benchmarking
+	let rt = Runtime::new().unwrap(); // Create Tokio runtime for async benchmarks
 
-	// Much smaller test sizes to avoid memory issues
-	let sizes = vec![10, 50, 100, 500, 1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+	let mut group = c.benchmark_group("Interpolation Strategies");
+	group.warm_up_time(std::time::Duration::from_secs(3));
+	group.measurement_time(std::time::Duration::from_secs(70)); // Increased for variable GPU operations
+	group.sample_size(10); // Minimum 10 samples required by Criterion
+	group.sampling_mode(criterion::SamplingMode::Flat); // Use flat sampling for variable GPU execution times
+
+	// Ultra-small test sizes for faster benchmarks
+	let sizes = vec![10, 50, 100, 500, 1_000, 10_000]; // Removed very large sizes
 	let resolution = Resolution::Minutes; // Use coarser resolution
 	let spline = Spline::Cubic; // Start with linear for simpler testing
 
@@ -43,46 +47,46 @@ fn bench_interpolation(c: &mut Criterion) {
 		if size < 100_000 {
 			// Benchmark plain CPU
 			group.bench_with_input(BenchmarkId::new("CPU", format!("{size}_in_{estimated_output}_out")), &size, |b, &size| {
-				b.to_async(criterion::async_executor::FuturesExecutor).iter(|| {
+				b.iter(|| {
 					let (mut points, bench_start, bench_end) = generate_test_data(size, start, resolution);
-					async move {
+					rt.block_on(async move {
 						cpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
 						cpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
-					}
+					})
 				});
 			});
 		}
 
 		// Benchmark parallel
 		group.bench_with_input(BenchmarkId::new("Parallel", format!("{size}_in_{estimated_output}_out")), &size, |b, &size| {
-			b.to_async(criterion::async_executor::FuturesExecutor).iter(|| {
+			b.iter(|| {
 				let (mut points, bench_start, bench_end) = generate_test_data(size, start, resolution);
-				async move {
+				rt.block_on(async move {
 					parallel_interpolate(&mut points, &bench_start, &bench_end, spline, resolution).await.unwrap();
 					parallel_interpolate(&mut points, &bench_start, &bench_end, spline, resolution).await.unwrap();
-				}
+				})
 			});
 		});
 
 		// Benchmark GPU
 		group.bench_with_input(BenchmarkId::new("GPU", format!("{size}_in_{estimated_output}_out")), &size, |b, &size| {
-			b.to_async(criterion::async_executor::FuturesExecutor).iter(|| {
+			b.iter(|| {
 				let (mut points, bench_start, bench_end) = generate_test_data(size, start, resolution);
-				async move {
+				rt.block_on(async move {
 					gpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
 					gpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
-				}
+				})
 			});
 		});
 
 		// Benchmark Auto
 		group.bench_with_input(BenchmarkId::new("Auto", format!("{size}_in_{estimated_output}_out")), &size, |b, &size| {
-			b.to_async(criterion::async_executor::FuturesExecutor).iter(|| {
+			b.iter(|| {
 				let (mut points, bench_start, bench_end) = generate_test_data(size, start, resolution);
-				async move {
+				rt.block_on(async move {
 					auto_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
 					auto_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
-				}
+				})
 			});
 		});
 	}
