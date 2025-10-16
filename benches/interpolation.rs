@@ -1,9 +1,9 @@
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Duration, Utc};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use splimes::{auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate, Point, Resolution, Spline};
+use splimes::{Point, Resolution, Spline, auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate};
 use tokio::runtime::Runtime;
 
 // Helper function to generate test data
@@ -40,7 +40,7 @@ fn bench_interpolation(c: &mut Criterion) {
 		let (_points, bench_start, bench_end) = generate_test_data(size, start, resolution);
 		let estimated_output = estimate_output_points(bench_start, bench_end, resolution);
 
-		println!("Testing size: {} input, {} estimated output", size, estimated_output);
+		println!("Testing size: {size} input, {estimated_output} estimated output");
 
 		// Only benchmark CPU for smaller datasets (< 100K points)
 		// CPU becomes impractically slow for larger datasets (397s vs 2.37s for parallel at 1M points)
@@ -52,7 +52,7 @@ fn bench_interpolation(c: &mut Criterion) {
 					rt.block_on(async move {
 						cpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
 						cpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
-					})
+					});
 				});
 			});
 		}
@@ -64,7 +64,7 @@ fn bench_interpolation(c: &mut Criterion) {
 				rt.block_on(async move {
 					parallel_interpolate(&mut points, &bench_start, &bench_end, spline, resolution).await.unwrap();
 					parallel_interpolate(&mut points, &bench_start, &bench_end, spline, resolution).await.unwrap();
-				})
+				});
 			});
 		});
 
@@ -75,7 +75,7 @@ fn bench_interpolation(c: &mut Criterion) {
 				rt.block_on(async move {
 					gpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
 					gpu_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
-				})
+				});
 			});
 		});
 
@@ -86,7 +86,7 @@ fn bench_interpolation(c: &mut Criterion) {
 				rt.block_on(async move {
 					auto_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
 					auto_interpolate(&mut points, bench_start, bench_end, resolution, spline).await.unwrap();
-				})
+				});
 			});
 		});
 	}
