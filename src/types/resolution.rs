@@ -1,3 +1,5 @@
+use std::{fmt::Display, str::FromStr};
+
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -118,6 +120,44 @@ impl Resolution {
 			Self::Weeks => Ok(*timestamp + chrono::Duration::weeks(step_base - offset)),
 			Self::Months => Ok(*timestamp + chrono::Duration::days((step_base - offset) / DAYS_IN_MONTH)),
 			Self::Years => Ok(*timestamp + chrono::Duration::days((step_base - offset) / DAYS_IN_YEAR)),
+		}
+	}
+}
+
+impl Display for Resolution {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let s = match self {
+			Self::Nanoseconds => "nanoseconds",
+			Self::Microseconds => "microseconds",
+			Self::Milliseconds => "milliseconds",
+			Self::Seconds => "seconds",
+			Self::Minutes => "minutes",
+			Self::Hours => "hours",
+			Self::Days => "days",
+			Self::Weeks => "weeks",
+			Self::Months => "months",
+			Self::Years => "years",
+		};
+		write!(f, "{s}")
+	}
+}
+
+impl FromStr for Resolution {
+	type Err = Error;
+
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+		match s {
+			"nanoseconds" => Ok(Self::Nanoseconds),
+			"microseconds" => Ok(Self::Microseconds),
+			"milliseconds" => Ok(Self::Milliseconds),
+			"seconds" => Ok(Self::Seconds),
+			"minutes" => Ok(Self::Minutes),
+			"hours" => Ok(Self::Hours),
+			"days" => Ok(Self::Days),
+			"weeks" => Ok(Self::Weeks),
+			"months" => Ok(Self::Months),
+			"years" => Ok(Self::Years),
+			_ => Err(Error::ConversionError(format!("Invalid resolution string: {s}"))),
 		}
 	}
 }
