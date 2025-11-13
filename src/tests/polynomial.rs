@@ -123,13 +123,13 @@ mod tests {
 
 		// Performance comparison between CPU, Parallel, and GPU
 		if gpu_time < cpu_time && gpu_time < parallel_time {
-			let percentage_difference = ((cpu_time - gpu_time).as_nanos() as f64 / gpu_time.as_nanos() as f64) * 100.0;
+			let percentage_difference = (cpu_time.checked_sub(gpu_time).unwrap().as_nanos() as f64 / gpu_time.as_nanos() as f64) * 100.0;
 			println!("Polynomial: GPU was faster by {percentage_difference:.2}%");
 		} else if cpu_time < gpu_time && cpu_time < parallel_time {
-			let percentage_difference = ((gpu_time - cpu_time).as_nanos() as f64 / cpu_time.as_nanos() as f64) * 100.0;
+			let percentage_difference = (gpu_time.checked_sub(cpu_time).unwrap().as_nanos() as f64 / cpu_time.as_nanos() as f64) * 100.0;
 			println!("Polynomial: CPU was faster by {percentage_difference:.2}%");
 		} else if parallel_time < cpu_time && parallel_time < gpu_time {
-			let percentage_difference = ((cpu_time - parallel_time).as_nanos() as f64 / parallel_time.as_nanos() as f64) * 100.0;
+			let percentage_difference = (cpu_time.checked_sub(parallel_time).unwrap().as_nanos() as f64 / parallel_time.as_nanos() as f64) * 100.0;
 			println!("Polynomial: SIMD was faster by {percentage_difference:.2}%");
 		} else {
 			let st = parallel_time.as_nanos();

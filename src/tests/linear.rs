@@ -213,16 +213,16 @@ pub mod tests {
 		drop(auto_values);
 
 		if auto_time < gpu_time && auto_time < cpu_time && auto_time < parallel_time {
-			let percentage_difference = ((gpu_time - auto_time).as_nanos() as f64 / auto_time.as_nanos() as f64) * 100.0;
+			let percentage_difference = (gpu_time.checked_sub(auto_time).unwrap().as_nanos() as f64 / auto_time.as_nanos() as f64) * 100.0;
 			println!("Linear: Auto was faster by {percentage_difference:.2}%");
 		} else if gpu_time < auto_time && gpu_time < cpu_time && gpu_time < parallel_time {
-			let percentage_difference = ((auto_time - gpu_time).as_nanos() as f64 / gpu_time.as_nanos() as f64) * 100.0;
+			let percentage_difference = (auto_time.checked_sub(gpu_time).unwrap().as_nanos() as f64 / gpu_time.as_nanos() as f64) * 100.0;
 			println!("Linear: GPU was faster by {percentage_difference:.2}%");
 		} else if cpu_time < auto_time && cpu_time < gpu_time && cpu_time < parallel_time {
-			let percentage_difference = ((auto_time - cpu_time).as_nanos() as f64 / cpu_time.as_nanos() as f64) * 100.0;
+			let percentage_difference = (auto_time.checked_sub(cpu_time).unwrap().as_nanos() as f64 / cpu_time.as_nanos() as f64) * 100.0;
 			println!("Linear: CPU was faster by {percentage_difference:.2}%");
 		} else if parallel_time < auto_time && parallel_time < gpu_time && parallel_time < cpu_time && parallel_time < parallel_time {
-			let percentage_difference = ((auto_time - parallel_time).as_nanos() as f64 / parallel_time.as_nanos() as f64) * 100.0;
+			let percentage_difference = (auto_time.checked_sub(parallel_time).unwrap().as_nanos() as f64 / parallel_time.as_nanos() as f64) * 100.0;
 			println!("Linear: SIMD was faster by {percentage_difference:.2}%");
 		} else {
 			let st = parallel_time.as_nanos();
