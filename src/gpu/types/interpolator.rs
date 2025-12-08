@@ -58,7 +58,7 @@ impl GpuInterpolator {
 	pub fn supports_f64_static() -> Result<bool> {
 		match GLOBAL_INTERPOLATOR.as_ref() {
 			Ok(interpolator) => Ok(interpolator.supports_f64),
-			Err(e) => bail!("Failed to access global interpolator: {}", e),
+			Err(e) => bail!("Failed to access global interpolator: {e}"),
 		}
 	}
 
@@ -69,7 +69,7 @@ impl GpuInterpolator {
 	pub fn get_device_static() -> Result<&'static Device> {
 		match GLOBAL_INTERPOLATOR.as_ref() {
 			Ok(interpolator) => Ok(&interpolator.device),
-			Err(e) => bail!("Failed to access global interpolator: {}", e),
+			Err(e) => bail!("Failed to access global interpolator: {e}"),
 		}
 	}
 
@@ -84,7 +84,7 @@ impl GpuInterpolator {
 	pub fn interpolate_f64_static(input_times: &[f64], input_values: &[f64], target_times: &[f64], method: &Method, config_buffer: &wgpu::Buffer) -> Result<Vec<f64>> {
 		let interpolator = match GLOBAL_INTERPOLATOR.as_ref() {
 			Ok(interpolator) => interpolator,
-			Err(e) => bail!("Failed to access global interpolator: {}", e),
+			Err(e) => bail!("Failed to access global interpolator: {e}"),
 		};
 
 		if input_times.is_empty() || target_times.is_empty() {
@@ -163,7 +163,7 @@ impl GpuInterpolator {
 	pub fn interpolate_f32_static(input_times: &[f32], input_values: &[f32], target_times: &[f32], method: &Method, config_buffer: &wgpu::Buffer) -> Result<Vec<f32>> {
 		let interpolator = match GLOBAL_INTERPOLATOR.as_ref() {
 			Ok(interpolator) => interpolator,
-			Err(e) => bail!("Failed to access global interpolator: {}", e),
+			Err(e) => bail!("Failed to access global interpolator: {e}"),
 		};
 
 		if input_times.is_empty() || target_times.is_empty() {
