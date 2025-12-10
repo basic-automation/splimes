@@ -5,17 +5,14 @@ pub mod tests {
 
 	use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, Zero};
 	use chrono::{DateTime, Utc};
-	use fake::{Fake, Faker};
 	use serial_test::serial;
 
 	use crate::{Point, Resolution, auto_interpolate, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::linear, tests::plot_terminal};
 
 	pub static POINTS: LazyLock<Vec<Point>> = LazyLock::new(|| {
 		let mut points: Vec<Point> = Vec::new();
-		let mut rng = rand::thread_rng();
 		for _ in 0..10 {
-			let point: Point = Faker.fake_with_rng(&mut rng);
-			points.push(point);
+			points.push(Point::random());
 		}
 		points.sort_by_key(|p| p.timestamp);
 		points
