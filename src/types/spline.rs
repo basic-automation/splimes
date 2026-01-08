@@ -1,3 +1,5 @@
+use std::{fmt::Display, str::FromStr};
+
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,6 +12,51 @@ pub enum Spline {
 	Quadratic,
 	Cubic,
 	Polynomial(usize, Option<f64>), // (degree, bounds_factor)
+}
+
+impl Display for Spline {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Linear => write!(f, "Linear"),
+			Self::Quadratic => write!(f, "Quadratic"),
+			Self::Cubic => write!(f, "Cubic"),
+			Self::Polynomial(degree, bounds_factor) => {
+				if let Some(bounds) = bounds_factor {
+					write!(f, "Polynomial(degree: {degree}, bounds_factor: {bounds})")
+				} else {
+					write!(f, "Polynomial(degree: {degree}, bounds_factor: None)")
+				}
+			}
+		}
+	}
+}
+
+impl FromStr for Spline {
+	type Err = anyhow::Error;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		match s {
+			"Linear" => Ok(Self::Linear),
+			"Quadratic" => Ok(Self::Quadratic),
+			"Cubic" => Ok(Self::Cubic),
+			_ if s.starts_with("Polynomial") => {
+				// Example format: "Polynomial(degree: 5, bounds_factor: 1.5)"
+				let parts: Vec<&str> = s.trim_start_matches("Polynomial(").trim_end_matches(')').split(',').collect();
+				if parts.len() != 2 {
+					bail!("Invalid Polynomial format");
+				}
+
+				let degree_part = parts[0].trim().strip_prefix("degree: ").ok_or_else(|| anyhow::anyhow!("Invalid degree format"))?;
+				let bounds_part = parts[1].trim().strip_prefix("bounds_factor: ").ok_or_else(|| anyhow::anyhow!("Invalid bounds_factor format"))?;
+
+				let degree = degree_part.parse::<usize>()?;
+				let bounds_factor = if bounds_part == "None" { None } else { Some(bounds_part.parse::<f64>()?) };
+
+				Ok(Self::Polynomial(degree, bounds_factor))
+			}
+			_ => bail!("Unknown spline type: {s}"),
+		}
+	}
 }
 
 impl Spline {
@@ -49,7 +96,7 @@ impl Spline {
 		}
 
 		if start >= end {
-			bail!("Start time {:?} must be before end time {:?}", start, end);
+			bail!("Start time {start:?} must be before end time {end:?}");
 		}
 
 		Ok(())

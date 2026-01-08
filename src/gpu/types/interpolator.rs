@@ -5,7 +5,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bytemuck::cast_slice;
 use wgpu::{
-	Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Dx12Compiler, Features, Gles3MinorVersion, Instance, InstanceDescriptor, InstanceFlags, Limits, PowerPreference, Queue, RequestAdapterOptions, ShaderStages, util::{BufferInitDescriptor, DeviceExt}
+	Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryHints, PowerPreference, Queue, RequestAdapterOptions, ShaderStages, util::{BufferInitDescriptor, DeviceExt}
 };
 
 use crate::gpu::Method;
@@ -33,7 +33,7 @@ pub struct GpuInterpolator {
 
 impl GpuInterpolator {
 	async fn new() -> Result<Self> {
-		let instance = Instance::new(InstanceDescriptor { backends: Backends::PRIMARY, flags: InstanceFlags::default(), dx12_shader_compiler: Dx12Compiler::default(), gles_minor_version: Gles3MinorVersion::default() });
+		let instance = Instance::new(&InstanceDescriptor { backends: Backends::PRIMARY, flags: InstanceFlags::default(), ..Default::default() });
 		let adapter = instance.request_adapter(&RequestAdapterOptions { power_preference: PowerPreference::HighPerformance, compatible_surface: None, force_fallback_adapter: false }).await.context("Failed to request GPU adapter")?;
 		//let adapter_info = adapter.get_info();
 		// println!("GPU: Adapter name: {}, Backend: {:?}", adapter_info.name, adapter_info.backend);
@@ -49,7 +49,7 @@ impl GpuInterpolator {
 
 		//let max_compute_workgroups_per_dimension = adapter_limits.max_compute_workgroups_per_dimension as usize;
 
-		let (device, queue) = adapter.request_device(&DeviceDescriptor { label: Some("Interpolation Device"), required_features: if supports_f64 { Features::SHADER_F64 } else { Features::empty() }, required_limits: Limits::default() }, None).await.context("Failed to request GPU device")?;
+		let (device, queue) = adapter.request_device(&DeviceDescriptor { label: Some("Interpolation Device"), required_features: if supports_f64 { Features::SHADER_F64 } else { Features::empty() }, required_limits: Limits::default(), memory_hints: MemoryHints::default(), ..Default::default() }).await.context("Failed to request GPU device")?;
 		let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor { label: Some("Interpolation Bind Group Layout"), entries: &[BindGroupLayoutEntry { binding: 0, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }, BindGroupLayoutEntry { binding: 1, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }, BindGroupLayoutEntry { binding: 2, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }, BindGroupLayoutEntry { binding: 3, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None }, BindGroupLayoutEntry { binding: 4, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }] });
 
 		Ok(Self { device, queue, bind_group_layout, pipelines_f64: Mutex::new(HashMap::new()), pipelines_f32: Mutex::new(HashMap::new()), supports_f64, max_storage_buffer_binding_size })
@@ -58,7 +58,7 @@ impl GpuInterpolator {
 	pub fn supports_f64_static() -> Result<bool> {
 		match GLOBAL_INTERPOLATOR.as_ref() {
 			Ok(interpolator) => Ok(interpolator.supports_f64),
-			Err(e) => bail!("Failed to access global interpolator: {}", e),
+			Err(e) => bail!("Failed to access global interpolator: {e}"),
 		}
 	}
 
@@ -69,7 +69,7 @@ impl GpuInterpolator {
 	pub fn get_device_static() -> Result<&'static Device> {
 		match GLOBAL_INTERPOLATOR.as_ref() {
 			Ok(interpolator) => Ok(&interpolator.device),
-			Err(e) => bail!("Failed to access global interpolator: {}", e),
+			Err(e) => bail!("Failed to access global interpolator: {e}"),
 		}
 	}
 
@@ -84,7 +84,7 @@ impl GpuInterpolator {
 	pub fn interpolate_f64_static(input_times: &[f64], input_values: &[f64], target_times: &[f64], method: &Method, config_buffer: &wgpu::Buffer) -> Result<Vec<f64>> {
 		let interpolator = match GLOBAL_INTERPOLATOR.as_ref() {
 			Ok(interpolator) => interpolator,
-			Err(e) => bail!("Failed to access global interpolator: {}", e),
+			Err(e) => bail!("Failed to access global interpolator: {e}"),
 		};
 
 		if input_times.is_empty() || target_times.is_empty() {
@@ -103,7 +103,7 @@ impl GpuInterpolator {
 				let shader_source = method.shader_source_f64();
 				let shader = interpolator.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("Interpolation Shader"), source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_source)) });
 				let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[&interpolator.bind_group_layout], push_constant_ranges: &[] });
-				let pipeline = interpolator.device.create_compute_pipeline(&ComputePipelineDescriptor { label: Some("Interpolation Pipeline"), layout: Some(&pipeline_layout), module: &shader, entry_point: "main" });
+				let pipeline = interpolator.device.create_compute_pipeline(&ComputePipelineDescriptor { label: Some("Interpolation Pipeline"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None });
 				pipelines.insert(*method, pipeline);
 			}
 		}
@@ -141,7 +141,7 @@ impl GpuInterpolator {
 			buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
 				tx.send(result).unwrap();
 			});
-			interpolator.device.poll(wgpu::Maintain::Wait);
+			let _ = interpolator.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 			rx.recv().unwrap().context("Failed to map buffer")?;
 			let data = buffer_slice.get_mapped_range();
 			let batch_results: Vec<f64> = bytemuck::cast_slice(&data).to_vec();
@@ -163,7 +163,7 @@ impl GpuInterpolator {
 	pub fn interpolate_f32_static(input_times: &[f32], input_values: &[f32], target_times: &[f32], method: &Method, config_buffer: &wgpu::Buffer) -> Result<Vec<f32>> {
 		let interpolator = match GLOBAL_INTERPOLATOR.as_ref() {
 			Ok(interpolator) => interpolator,
-			Err(e) => bail!("Failed to access global interpolator: {}", e),
+			Err(e) => bail!("Failed to access global interpolator: {e}"),
 		};
 
 		if input_times.is_empty() || target_times.is_empty() {
@@ -183,7 +183,7 @@ impl GpuInterpolator {
 				let shader_source = method.shader_source_f32();
 				let shader = interpolator.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("Interpolation Shader"), source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_source)) });
 				let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[&interpolator.bind_group_layout], push_constant_ranges: &[] });
-				let pipeline = interpolator.device.create_compute_pipeline(&ComputePipelineDescriptor { label: Some("Interpolation Pipeline"), layout: Some(&pipeline_layout), module: &shader, entry_point: "main" });
+				let pipeline = interpolator.device.create_compute_pipeline(&ComputePipelineDescriptor { label: Some("Interpolation Pipeline"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None });
 				pipelines.insert(*method, pipeline);
 			}
 		}
@@ -222,7 +222,7 @@ impl GpuInterpolator {
 			buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
 				tx.send(result).unwrap();
 			});
-			interpolator.device.poll(wgpu::Maintain::Wait);
+			let _ = interpolator.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 			rx.recv().unwrap().context("Failed to map buffer")?;
 			let data = buffer_slice.get_mapped_range();
 			let batch_results: Vec<f32> = bytemuck::cast_slice(&data).to_vec();

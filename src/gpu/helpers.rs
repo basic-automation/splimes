@@ -7,7 +7,7 @@ use crate::{
 };
 
 pub async fn get_max_buffer_size() -> Result<u64> {
-	let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+	let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
 	let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.unwrap();
 	let limits = adapter.limits();
 	Ok(limits.max_buffer_size)
