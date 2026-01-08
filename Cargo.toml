@@ -37,3 +37,4 @@ crossterm = { workspace = true, features = ["event-stream", "filedescriptor", "l
 [[bench]]
 name = "interpolation"
 harness = false
+ 
