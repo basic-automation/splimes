@@ -7,7 +7,7 @@ pub mod tests {
 	use chrono::{DateTime, Utc};
 	use serial_test::serial;
 
-	use crate::{Point, Resolution, auto_interpolate, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::linear, tests::plot_terminal};
+	use crate::{auto_interpolate, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::linear, tests::plot_terminal, Point, Resolution};
 
 	pub static POINTS: LazyLock<Vec<Point>> = LazyLock::new(|| {
 		let mut points: Vec<Point> = Vec::new();
