@@ -1,20 +1,21 @@
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Duration, Utc};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use splimes::{Point, Resolution, Spline, auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate};
 use tokio::runtime::Runtime;
 
 // Helper function to generate test data
 fn generate_test_data(input_size: usize, start: DateTime<Utc>, _resolution: Resolution) -> (Vec<Point>, DateTime<Utc>, DateTime<Utc>) {
+	use rand::Rng;
 	let mut rng = ChaCha8Rng::seed_from_u64(42);
 	let mut points = Vec::with_capacity(input_size);
 	let mut current_time = start;
 	for _ in 0..input_size {
-		let value = rng.gen_range(0.0..100.0);
+		let value = rng.random_range(0.0..100.0);
 		points.push(Point { timestamp: current_time, value: bigdecimal::BigDecimal::from_f64(value).unwrap() });
-		current_time += Duration::seconds(rng.gen_range(1..60));
+		current_time += Duration::seconds(rng.random_range(1..60));
 	}
 	// Create a smaller time range to avoid massive output
 	let end = current_time + Duration::minutes(180); // Much smaller range
