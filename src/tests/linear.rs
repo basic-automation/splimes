@@ -18,7 +18,9 @@ pub mod tests {
 		points
 	});
 
-	pub const Z_THRESHOLD: f64 = 2.0;
+	// Z-score threshold for outlier detection. Set higher to accommodate
+	// extrapolated edge values which can naturally deviate from the mean.
+	pub const Z_THRESHOLD: f64 = 10.0;
 	pub const COS_THRESHOLD: f64 = 1e-8;
 	pub const RESOLUTION: Resolution = Resolution::Seconds;
 

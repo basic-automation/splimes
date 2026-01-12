@@ -24,15 +24,22 @@ pub use splines::{DAYS_IN_MONTH, DAYS_IN_YEAR, SECONDS_IN_DAY, SECONDS_IN_HOUR, 
 /// It automatically selects the optimal interpolation strategy (GPU, CPU, SIMD, Parallel)
 /// based on dataset characteristics and performance benchmarks.
 ///
+/// If the requested spline method requires more points than available, this function
+/// will automatically fall back to a simpler method that can work with the available data:
+/// - Cubic (4 points) → Quadratic (3 points) → Linear (2 points)
+/// - Polynomial(n) → lower degree polynomial → Cubic → Quadratic → Linear
+///
+/// With only 1 point, it returns that point's value for any requested time.
+/// With 0 points, it returns an error.
+///
 /// # Errors
 ///
 /// Returns an error if:
-/// - Insufficient measurements for interpolation
-/// - Invalid time range
-/// - GPU initialization fails (with CPU fallback)
+/// - No measurements provided (0 points)
+/// - Invalid time range (start >= end)
 /// - All interpolation methods fail
 pub async fn auto_interpolate(points: &mut [Point], start: DateTime<Utc>, end: DateTime<Utc>, resolution: Resolution, spline: Spline) -> Result<Vec<Point>> {
-	if points.len() < spline.number_of_points_required() {
+	if points.is_empty() {
 		bail!(Error::InsufficientMeasurementsError);
 	}
 
@@ -40,38 +47,90 @@ pub async fn auto_interpolate(points: &mut [Point], start: DateTime<Utc>, end: D
 		bail!(Error::InvalidTimeRangeError);
 	}
 
+	// Handle single point case - return constant value for all requested times
+	if points.len() == 1 {
+		let target_times = helpers::generate_target_times(start, end, resolution);
+		let constant_value = points[0].value.clone();
+		return Ok(target_times.into_iter().map(|t| Point { timestamp: t, value: constant_value.clone() }).collect());
+	}
+
+	// Determine the best available spline method based on point count
+	let effective_spline = select_best_available_spline(spline, points.len());
+
 	let estimated_output_points = helpers::estimate_output_points(start, end, resolution);
-	let spline = apply_fast_path(spline, points.len());
+	let effective_spline = apply_fast_path(effective_spline, points.len());
 
 	// Use centralized strategy selection based on benchmark results
 	match helpers::should_use_gpu(points.len(), estimated_output_points) {
 		helpers::InterpolationStrategy::GpuPrimary => {
 			// Try GPU first for very large datasets where it's proven to be faster
-			if let Ok(result) = gpu_interpolate(points, start, end, resolution, spline).await {
+			if let Ok(result) = gpu_interpolate(points, start, end, resolution, effective_spline).await {
 				return Ok(result);
 			}
 			// Fallback to parallel if GPU fails
-			parallel_interpolate(points, &start, &end, spline, resolution).await
+			parallel_interpolate(points, &start, &end, effective_spline, resolution).await
 		}
 		helpers::InterpolationStrategy::GpuThenParallel => {
 			// Try GPU with timeout for large datasets where it's competitive
-			let gpu_result = tokio::time::timeout(std::time::Duration::from_secs(10), gpu_interpolate(points, start, end, resolution, spline)).await;
+			let gpu_result = tokio::time::timeout(std::time::Duration::from_secs(10), gpu_interpolate(points, start, end, resolution, effective_spline)).await;
 
 			match gpu_result {
 				Ok(Ok(result)) => Ok(result),
 				_ => {
 					// Quick fallback to parallel
-					parallel_interpolate(points, &start, &end, spline, resolution).await
+					parallel_interpolate(points, &start, &end, effective_spline, resolution).await
 				}
 			}
 		}
 		helpers::InterpolationStrategy::Parallel => {
 			// Use parallel for medium-sized datasets
-			parallel_interpolate(points, &start, &end, spline, resolution).await
+			parallel_interpolate(points, &start, &end, effective_spline, resolution).await
 		}
 		helpers::InterpolationStrategy::Cpu => {
 			// Use CPU for small datasets to avoid overhead
-			cpu_interpolate(points, start, end, resolution, spline).await
+			cpu_interpolate(points, start, end, resolution, effective_spline).await
+		}
+	}
+}
+
+/// Select the best available spline method based on the number of points available.
+/// Falls back to simpler methods ONLY - never upgrades to a more complex method than requested.
+/// Fallback order: Polynomial(n) → Polynomial(n-1) → ... → Cubic → Quadratic → Linear
+#[must_use]
+const fn select_best_available_spline(requested: Spline, point_count: usize) -> Spline {
+	// If we have enough points for the requested method, use it exactly as requested
+	if point_count >= requested.number_of_points_required() {
+		return requested;
+	}
+
+	// Not enough points - fall back to simpler methods, respecting the user's requested ceiling
+	// We can only fall back to methods SIMPLER than what was requested
+	match requested {
+		Spline::Linear => {
+			// Linear is the simplest, no fallback possible (needs 2 points minimum)
+			// With 1 point, we handle it specially in auto_interpolate
+			Spline::Linear
+		}
+		Spline::Cubic | Spline::Quadratic => {
+			// Cubic needs 4 points, can fall back to Quadratic (3) or Linear (2)
+			// With 0-1 points, Linear will be handled specially in auto_interpolate
+			if point_count >= 3 { Spline::Quadratic } else { Spline::Linear }
+		}
+		Spline::Polynomial(_degree, _bounds) => {
+			// Polynomial(n) needs n+1 points
+			// Fall back through lower degrees, but cap at Cubic since that's the highest non-polynomial
+			let max_usable_degree = point_count.saturating_sub(1);
+
+			if max_usable_degree > 3 {
+				requested
+			} else if max_usable_degree == 3 {
+				// Can use Cubic (degree 3)
+				Spline::Cubic
+			} else if max_usable_degree == 2 {
+				Spline::Quadratic
+			} else {
+				Spline::Linear
+			}
 		}
 	}
 }
