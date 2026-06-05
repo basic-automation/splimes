@@ -3,7 +3,12 @@ name = "splimes"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+gpu-eager-init = ["dep:ctor"]
+
 [dependencies]
+ctor = { workspace = true, optional = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 bigdecimal = { workspace = true, features = ["serde"] }
@@ -31,10 +36,26 @@ rand_chacha = { workspace = true }
 bigdecimal = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
 serial_test = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 ratatui = { workspace = true, features = ["default", "all-widgets", "document-features", "macros", "palette", "scrolling-regions", "serde", "termion", "termwiz"] }
 crossterm = { workspace = true, features = ["event-stream", "filedescriptor", "libc", "osc52", "serde"]}
 
 [[bench]]
 name = "interpolation"
 harness = false
- 
+
+[[bench]]
+name = "gpu_prewarm"
+harness = false
+
+[[bench]]
+name = "gpu_cold"
+harness = false
+
+[[bench]]
+name = "should_use_gpu_analysis"
+harness = false
+
+[[bench]]
+name = "gpu_optimization_bench"
+harness = false

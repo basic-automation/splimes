@@ -4,14 +4,17 @@ mod tests {
 	use serial_test::serial;
 
 	use crate::{
-		Resolution, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::polynomial, tests::{
+		Resolution, gpu::types::GpuInterpolator, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::polynomial, tests::{
 			linear::tests::{COS_THRESHOLD, POINTS, RESOLUTION, Z_THRESHOLD, check_similarity}, plot_terminal
 		}
 	};
 
 	#[tokio::test]
-	#[serial]
+	#[serial(gpu_tests)]
 	async fn test_polynomial_interpolation() {
+		// Clear GPU buffer pool for test isolation
+		GpuInterpolator::clear_buffer_pool_static().expect("Failed to clear GPU buffer pool");
+
 		let mut points = POINTS.clone();
 		let start = {
 			let s = points.first().map_or_else(Utc::now, |p| p.timestamp);
@@ -141,6 +144,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[serial(gpu_tests)]
 	async fn test_target_times() {
 		let points = POINTS.clone();
 		let start = {

@@ -2,25 +2,39 @@ use std::{
 	fs::File, io::{BufRead, BufWriter, Write}
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use sysinfo::System;
 use tempfile::NamedTempFile;
 use wgpu::util::DeviceExt;
 
 use crate::{
-	Error, Point, Resolution, Spline, gpu::{Method, types::GpuInterpolator}, helpers::{InterpolationState, TargetTimesIterator, batch}
+	gpu::{types::GpuInterpolator, Method}, helpers::{batch, InterpolationState, TargetTimesIterator}, Error, Point, Resolution, Spline
 };
 
 mod helpers;
 mod shaders;
-mod types;
+pub mod types;
+pub mod buffer_pool;
+pub mod staging_buffer_manager;
+pub mod async_handle;
+pub mod config;
 
-pub use helpers::*;
 pub use types::*;
+pub use buffer_pool::BufferPoolStats;
+pub use staging_buffer_manager::StagingBufferManager;
+pub use config::GpuConfig;
 
 const F64_SIZE: usize = std::mem::size_of::<f64>();
 const NUMBER_OF_BUFFERS: usize = 4;
+
+/// Pre-warms the GPU interpolator to eliminate first-use latency.
+///
+/// # Errors
+/// Returns the initialization error if GPU setup fails.
+pub fn force_init_gpu() -> Result<()> {
+	GpuInterpolator::force_init()
+}
 
 /// Performs GPU-accelerated interpolation on data points
 ///
@@ -40,7 +54,11 @@ pub async fn gpu_interpolate(points: &mut [Point], start: DateTime<Utc>, end: Da
 		Spline::Polynomial(degree, _) => Method::Polynomial(points.len().min(degree + 1)),
 	};
 	// Use static method to check f64 support instead of creating new instance
-	if GpuInterpolator::supports_f64_static()? { gpu_interpolate_f64(points, &start, &end, &resolution, &method, &spline).await } else { batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await }
+	if GpuInterpolator::supports_f64_static()? {
+		gpu_interpolate_f64(points, &start, &end, resolution, &method, &spline)
+	} else {
+		batch(points, &start, &end, &spline, &resolution, |state| Box::pin(gpu_interpolate_f32(state))).await
+	}
 }
 
 /// Performs f32 GPU interpolation for batched processing
@@ -82,17 +100,21 @@ pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 
 	// Remove the local interpolator creation
 	let mut b = Vec::with_capacity(batch_size);
+	#[allow(unused_mut)] // Used within the loop even if compiler thinks otherwise
 	let mut time_offset = 0usize;
+
+	// Fix 5: Move F32 conversion OUTSIDE the batch loop - input_points doesn't change
+	let (input_times, input_values) = helpers::convert_points_to_gpu_format_f32(input_points, state.resolution)?;
+
+	// FIX: Get max buffer size ONCE before the loop (was creating new GPU instance per iteration!)
+	let max_buffer_size = GpuInterpolator::get_max_buffer_size_static()?;
+	let max_single_buffer_size = max_buffer_size / NUMBER_OF_BUFFERS;
 
 	for batch in batch_times.chunks(batch_size) {
 		let target_times_array = helpers::convert_datetimes_to_gpu_format_f32(batch, state.resolution, input_points[0].timestamp)?;
-		let m_b = get_max_buffer_size().await?;
-		let m_b = usize::try_from(m_b).context("Failed to convert buffer size to usize")?;
-		let max_single_buffer_size = m_b / NUMBER_OF_BUFFERS;
 		let max_targets_per_batch = (max_single_buffer_size / F64_SIZE).min(target_times_array.len());
 
 		for target_batch in target_times_array.chunks(max_targets_per_batch) {
-			let (input_times, input_values) = helpers::convert_points_to_gpu_format_f32(input_points, state.resolution)?;
 			let config = match method {
 				Method::Linear => [u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, 1, 0, 0],
 				Method::Quadratic => [u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, 2, 0, 0],
@@ -106,10 +128,11 @@ pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 					[u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, u32::try_from(degree).context("degree exceeds u32 limit")?, bounds_factor.to_bits(), 0]
 				}
 			};
-			// Use static method instead of instance method - convert config to bytes
+			// Use create_buffer_init for config (small buffer, not worth pooling)
 			let config_bytes = bytemuck::cast_slice(&config);
-			let config_buffer = GpuInterpolator::get_device_static()?.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("content"), contents: config_bytes, usage: wgpu::BufferUsages::UNIFORM });
-			// Use static interpolation method
+			let config_buffer = GpuInterpolator::get_device_static()?.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("Config Buffer"), contents: config_bytes, usage: wgpu::BufferUsages::UNIFORM });
+
+			// Use static interpolation method with reused input data
 			let results: Vec<f32> = GpuInterpolator::interpolate_f32_static(&input_times, &input_values, target_batch, &method, &config_buffer)?;
 			let target_slice = &batch[time_offset..time_offset + target_batch.len()];
 			let batch_results = helpers::convert_gpu_results_to_points_f32(results, target_slice);
@@ -118,6 +141,7 @@ pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 		}
 		time_offset = 0;
 	}
+
 	if let Some(result) = &mut state.result {
 		result.extend(b);
 	} else if let Some(writer_mutex) = &state.temp_file {
@@ -141,7 +165,7 @@ pub async fn gpu_interpolate_f32(state: &mut InterpolationState) -> Result<()> {
 /// - GPU operations fail
 /// - Buffer operations fail
 /// - File I/O operations fail
-pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: &Resolution, method: &Method, spline: &Spline) -> Result<Vec<Point>> {
+pub fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: Resolution, method: &Method, spline: &Spline) -> Result<Vec<Point>> {
 	if points.len() < 2 {
 		bail!("Insufficient points for interpolation");
 	}
@@ -163,12 +187,12 @@ pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &
 	let point_size = std::mem::size_of::<Point>() as u64;
 
 	let element_size = F64_SIZE;
-	let (input_times, input_values) = helpers::convert_points_to_gpu_format_f64(points, *resolution)?;
+	let (input_times, input_values) = helpers::convert_points_to_gpu_format_f64(points, resolution)?;
 	let base_time = points[0].timestamp;
 
 	let rounded_start = resolution.round(start)?;
 	let rounded_end = resolution.round(end)?;
-	let time_iter = TargetTimesIterator::new(rounded_start, rounded_end, *resolution);
+	let time_iter = TargetTimesIterator::new(rounded_start, rounded_end, resolution);
 	if let Ok(estimated_points) = time_iter.estimate_len() {
 		system.refresh_memory();
 		let estimated_memory = u64::try_from(estimated_points).context("Failed to convert estimated_points to u64")? * point_size;
@@ -179,16 +203,18 @@ pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &
 			temp_path = Some(path);
 		}
 	}
+
+	// FIX: Get max buffer size ONCE before the loop (was creating new GPU instance per iteration!)
+	let max_buffer_size = GpuInterpolator::get_max_buffer_size_static()?;
+	let max_single_buffer_size = max_buffer_size / NUMBER_OF_BUFFERS;
+
 	for batch_times in time_iter {
 		let batch_size = batch_times.len();
 		if batch_size == 0 {
 			continue;
 		}
 
-		let target_times_array = helpers::convert_datetimes_to_gpu_format_f64(&batch_times, *resolution, base_time)?;
-		let max_buffer_size = get_max_buffer_size().await?;
-		let max_buffer_size_usize = usize::try_from(max_buffer_size).context("Failed to convert max_buffer_size to usize")?;
-		let max_single_buffer_size = max_buffer_size_usize / NUMBER_OF_BUFFERS;
+		let target_times_array = helpers::convert_datetimes_to_gpu_format_f64(&batch_times, resolution, base_time)?;
 		let max_targets_per_batch = (max_single_buffer_size / element_size).min(target_times_array.len());
 
 		let mut time_offset = 0usize;
@@ -209,9 +235,10 @@ pub async fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &
 					[u32::try_from(time_offset).context("time_offset exceeds u32 limit")?, u32::try_from(*degree).context("degree exceeds u32 limit")?, bounds_factor_bits_low, bounds_factor_bits_high]
 				}
 			};
-			// Use static method instead of instance method - convert config to bytes
+			// Use create_buffer_init for config (small buffer, not worth pooling)
 			let config_bytes = bytemuck::cast_slice(&config);
-			let config_buffer = GpuInterpolator::get_device_static()?.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("content"), contents: config_bytes, usage: wgpu::BufferUsages::UNIFORM });
+			let config_buffer = GpuInterpolator::get_device_static()?.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("Config Buffer"), contents: config_bytes, usage: wgpu::BufferUsages::UNIFORM });
+
 			// Use static interpolation method
 			let batch_results: Vec<f64> = GpuInterpolator::interpolate_f64_static(&input_times, &input_values, target_batch, method, &config_buffer)?;
 			let target_slice = &batch_times[time_offset..time_offset + target_batch.len()];

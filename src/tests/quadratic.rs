@@ -4,14 +4,17 @@ mod tests {
 	use serial_test::serial;
 
 	use crate::{
-		Resolution, auto_interpolate, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::quadratic, tests::{
+		Resolution, auto_interpolate, gpu::types::GpuInterpolator, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::quadratic, tests::{
 			linear::tests::{COS_THRESHOLD, POINTS, RESOLUTION, Z_THRESHOLD, check_similarity}, plot_terminal
 		}
 	};
 
 	#[tokio::test]
-	#[serial]
+	#[serial(gpu_tests)]
 	async fn test_quadratic_interpolation() {
+		// Clear GPU buffer pool for test isolation
+		GpuInterpolator::clear_buffer_pool_static().expect("Failed to clear GPU buffer pool");
+
 		let mut points = POINTS.clone();
 		let start = {
 			let s = points.first().map_or_else(Utc::now, |p| p.timestamp);
@@ -163,6 +166,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[serial(gpu_tests)]
 	async fn test_target_times() {
 		let points = POINTS.clone();
 		let start = {

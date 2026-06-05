@@ -67,39 +67,21 @@ fn quadratic_interpolate_general(target_time: f32) -> f32 {
         // Interpolation
         var left = 0u;
         var right = input_count - 1u;
+
         while (left < right - 1u) {
             let mid = left + (right - left) / 2u;
-            let norm_mid_time = input_times[mid] - base_time;
-            if (norm_mid_time <= norm_target_time) {
-                left = mid;
-            } else {
+            if (norm_target_time < (input_times[mid] - base_time)) {
                 right = mid;
+            } else {
+                left = mid;
             }
         }
 
-        var center_idx = left;
-        if (norm_target_time > (input_times[left] - base_time)) {
-            center_idx = min(left + 1u, input_count - 2u);
-        }
-        center_idx = max(center_idx, 1u);
-        center_idx = min(center_idx, input_count - 2u);
+        let center_idx = left;
 
-        var i0: u32;
-        var i1: u32;
-        var i2: u32;
-        if (center_idx == 0u) {
-            i0 = 0u;
-            i1 = 1u;
-            i2 = 2u;
-        } else if (center_idx >= input_count - 1u) {
-            i0 = input_count - 3u;
-            i1 = input_count - 2u;
-            i2 = input_count - 1u;
-        } else {
-            i0 = center_idx - 1u;
-            i1 = center_idx;
-            i2 = center_idx + 1u;
-        }
+        let i1 = max(1u, min(center_idx, input_count - 2u));
+        let i0 = i1 - 1u;
+        let i2 = i1 + 1u;
 
         let t0 = input_times[i0] - base_time;
         let t1 = input_times[i1] - base_time;
@@ -121,7 +103,6 @@ fn quadratic_interpolate_general(target_time: f32) -> f32 {
         let l2 = ((norm_target_time - t0) * (norm_target_time - t1)) / denom2;
 
         return v0 * l0 + v1 * l1 + v2 * l2;
-    }
 }
 
 @compute @workgroup_size(256)

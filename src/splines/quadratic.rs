@@ -1,13 +1,13 @@
 use std::io::Write;
 
-use anyhow::{Result, bail};
-use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, Zero};
+use anyhow::{bail, Result};
+use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive};
 use chrono::{DateTime, Utc};
 use wide::f64x4;
 
 use super::SIMD_BATCH_SIZE;
 use crate::{
-	Error, Point, Resolution, Spline, helpers::{InterpolationState, batch}
+	helpers::{batch, InterpolationState}, Error, Point, Resolution, Spline
 };
 
 pub async fn quadratic(points: &mut [Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: &Resolution) -> Result<Vec<Point>> {
@@ -27,20 +27,24 @@ pub async fn quadratic_interpolate(state: &mut InterpolationState) -> Result<()>
 		state.result = Some(Vec::new());
 	}
 
-	let base_time = input_points[0].timestamp;
-	let input_count = input_points.len();
+	// Sort points by timestamp to match GPU/SIMD behavior
+	let mut sorted_points = input_points.clone();
+	sorted_points.sort_by_key(|p| p.timestamp);
+
+	let base_time = sorted_points[0].timestamp;
+	let input_count = sorted_points.len();
 
 	for current_time in batch_times {
-		let value = if *current_time < input_points[0].timestamp {
-			extrapolate_backward_quadratic(input_points, *current_time, &base_time, state.resolution)?
-		} else if *current_time > input_points[input_count - 1].timestamp {
-			extrapolate_forward_quadratic(input_points, *current_time, &base_time, state.resolution)?
+		let value = if *current_time < sorted_points[0].timestamp {
+			extrapolate_backward_quadratic(&sorted_points, *current_time, &base_time, state.resolution)?
+		} else if *current_time > sorted_points[input_count - 1].timestamp {
+			extrapolate_forward_quadratic(&sorted_points, *current_time, &base_time, state.resolution)?
 		} else {
-			interpolate_quadratic(input_points, *current_time, &base_time, state.resolution)?
+			interpolate_quadratic(&sorted_points, *current_time, &base_time, state.resolution)?
 		};
 
 		if state.temp_file.is_none() {
-			state.result.as_mut().unwrap().push(Point { timestamp: *current_time, value });
+			state.result.as_mut().ok_or_else(|| Error::ConversionError("Result not initialized".to_string()))?.push(Point { timestamp: *current_time, value });
 		} else if let Some(writer) = state.temp_file.as_mut() {
 			writeln!(writer.lock().await, "{},{}", current_time.to_rfc3339(), value)?;
 		}
@@ -69,7 +73,7 @@ fn extrapolate_backward_quadratic(points: &[Point], target_time: DateTime<Utc>, 
 	let denom1 = (&t1 - &t0) * (&t1 - &t2);
 	let denom2 = (&t2 - &t0) * (&t2 - &t1);
 
-	if denom0.abs() < BigDecimal::from_f64(1e-10).unwrap() || denom1.abs() < BigDecimal::from_f64(1e-10).unwrap() || denom2.abs() < BigDecimal::from_f64(1e-10).unwrap() {
+	if denom0.abs() < BigDecimal::from_f64(1e-10).ok_or(Error::DecimalConversionError)? || denom1.abs() < BigDecimal::from_f64(1e-10).ok_or(Error::DecimalConversionError)? || denom2.abs() < BigDecimal::from_f64(1e-10).ok_or(Error::DecimalConversionError)? {
 		return Ok(v1.clone());
 	}
 
@@ -97,7 +101,7 @@ fn extrapolate_forward_quadratic(points: &[Point], target_time: DateTime<Utc>, b
 	let denom1 = (&t1 - &t0) * (&t1 - &t2);
 	let denom2 = (&t2 - &t0) * (&t2 - &t1);
 
-	if denom0.abs() < BigDecimal::from_f64(1e-10).unwrap() || denom1.abs() < BigDecimal::from_f64(1e-10).unwrap() || denom2.abs() < BigDecimal::from_f64(1e-10).unwrap() {
+	if denom0.abs() < BigDecimal::from_f64(1e-10).ok_or(Error::DecimalConversionError)? || denom1.abs() < BigDecimal::from_f64(1e-10).ok_or(Error::DecimalConversionError)? || denom2.abs() < BigDecimal::from_f64(1e-10).ok_or(Error::DecimalConversionError)? {
 		return Ok(v1.clone());
 	}
 
@@ -110,10 +114,10 @@ fn extrapolate_forward_quadratic(points: &[Point], target_time: DateTime<Utc>, b
 
 fn interpolate_quadratic(points: &[Point], target_time: DateTime<Utc>, base_time: &DateTime<Utc>, resolution: Resolution) -> Result<BigDecimal> {
 	let input_count = points.len();
-	let norm_times: Vec<BigDecimal> = points.iter().map(|p| BigDecimal::from_i64(resolution.difference(&p.timestamp, base_time).unwrap()).unwrap()).collect();
+	let norm_times: Vec<BigDecimal> = points.iter().map(|p| resolution.difference(&p.timestamp, base_time).and_then(|d| BigDecimal::from_i64(d).ok_or_else(|| anyhow::anyhow!(Error::DecimalConversionError)))).collect::<Result<Vec<BigDecimal>>>()?;
 	let target_t = BigDecimal::from_i64(resolution.difference(&target_time, base_time)?).ok_or(Error::DecimalConversionError)?;
 
-	let center_idx = match norm_times.binary_search_by(|t| t.partial_cmp(&target_t).unwrap()) {
+	let center_idx = match norm_times.binary_search_by(|t| t.partial_cmp(&target_t).unwrap_or(std::cmp::Ordering::Equal)) {
 		Ok(idx) => idx,
 		Err(idx) => idx.max(1).min(input_count - 2),
 	};
@@ -137,7 +141,7 @@ fn interpolate_quadratic(points: &[Point], target_time: DateTime<Utc>, base_time
 	let denom1 = (t1 - t0) * (t1 - t2);
 	let denom2 = (t2 - t0) * (t2 - t1);
 
-	if denom0.abs() < BigDecimal::from_f64(1e-10).unwrap() || denom1.abs() < BigDecimal::from_f64(1e-10).unwrap() || denom2.abs() < BigDecimal::from_f64(1e-10).unwrap() {
+	if denom0.abs() < BigDecimal::from_f64(1e-10).ok_or(Error::DecimalConversionError)? || denom1.abs() < BigDecimal::from_f64(1e-10).ok_or(Error::DecimalConversionError)? || denom2.abs() < BigDecimal::from_f64(1e-10).ok_or(Error::DecimalConversionError)? {
 		return Ok(v1.clone());
 	}
 
@@ -148,18 +152,18 @@ fn interpolate_quadratic(points: &[Point], target_time: DateTime<Utc>, base_time
 	Ok(v0 * &l0 + v1 * &l1 + v2 * &l2)
 }
 
-pub fn quadratic_simd(points: &[Point], target_times: &[DateTime<Utc>], resolution: Resolution) -> Vec<Point> {
+pub fn quadratic_simd(points: &[Point], target_times: &[DateTime<Utc>], resolution: Resolution) -> Result<Vec<Point>> {
 	if target_times.is_empty() {
-		return Vec::new();
+		return Ok(Vec::new());
 	}
 
 	let mut sorted_points = points.to_vec();
 	sorted_points.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
 	let base_time = sorted_points[0].timestamp;
-	let input_times: Vec<f64> = sorted_points.iter().map(|m| f64::from_i64(resolution.difference(&m.timestamp, &base_time).unwrap_or(0)).unwrap_or_default()).collect();
-	let input_values: Vec<f64> = sorted_points.iter().map(|m| round_to_places(m.value.to_f64().unwrap_or(0.0), 10)).collect();
-	let targets: Vec<f64> = target_times.iter().map(|t| f64::from_i64(resolution.difference(t, &base_time).unwrap_or(0)).unwrap_or_default()).collect();
+	let input_times: Vec<f64> = sorted_points.iter().map(|m| resolution.difference(&m.timestamp, &base_time).map(|d| d as f64)).collect::<Result<Vec<f64>>>()?;
+	let input_values: Vec<f64> = sorted_points.iter().map(|m| m.value.to_f64().ok_or(Error::DecimalConversionError).map(|v| round_to_places(v, 10)).map_err(anyhow::Error::from)).collect::<Result<Vec<f64>>>()?;
+	let targets: Vec<f64> = target_times.iter().map(|t| resolution.difference(t, &base_time).map(|d| d as f64)).collect::<Result<Vec<f64>>>()?;
 
 	let data_start = input_times[0];
 
@@ -170,7 +174,7 @@ pub fn quadratic_simd(points: &[Point], target_times: &[DateTime<Utc>], resoluti
 		let chunk_size = chunk.len();
 		padded_targets[..chunk_size].copy_from_slice(chunk);
 		if chunk_size < SIMD_BATCH_SIZE {
-			let last_value = chunk.last().copied().unwrap_or(0.0);
+			let last_value = chunk.last().copied().ok_or_else(|| Error::ConversionError("Empty chunk".to_string()))?;
 			padded_targets[chunk_size..].fill(last_value);
 		}
 
@@ -181,7 +185,7 @@ pub fn quadratic_simd(points: &[Point], target_times: &[DateTime<Utc>], resoluti
 		results.extend_from_slice(&result_array[..chunk_size]);
 	}
 
-	results.into_iter().enumerate().map(|(i, value)| Point { timestamp: target_times[i], value: BigDecimal::from_f64(round_to_places(value, 10)).unwrap_or_else(BigDecimal::zero) }).collect()
+	results.into_iter().enumerate().map(|(i, value)| Ok(Point { timestamp: target_times[i], value: BigDecimal::from_f64(round_to_places(value, 10)).ok_or(Error::DecimalConversionError)? })).collect::<Result<Vec<Point>>>()
 }
 
 fn simd_quadratic_interpolate_general(input_times: &[f64], input_values: &[f64], target_times: f64x4, base_time: f64) -> f64x4 {
@@ -240,7 +244,7 @@ fn simd_quadratic_interpolate_general(input_times: &[f64], input_values: &[f64],
 			results[i] = v2.mul_add(l2, v0.mul_add(l0, v1 * l1));
 		} else {
 			// Interpolation
-			let center_idx = match input_times.binary_search_by(|t| t.partial_cmp(&target_time).unwrap()) {
+			let center_idx = match input_times.binary_search_by(|t| t.partial_cmp(&target_time).unwrap_or(std::cmp::Ordering::Equal)) {
 				Ok(idx) => idx,
 				Err(idx) => idx.max(1).min(input_count - 2),
 			};

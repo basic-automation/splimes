@@ -55,7 +55,7 @@ pub async fn linear_interpolate(state: &mut InterpolationState) -> Result<()> {
 /// - Insufficient points (< 2 points)
 /// - Timestamp conversion fails
 /// - `BigDecimal` operations fail
-pub fn linear_simd(points: &[Point], target_times: &[DateTime<Utc>], resolution: Resolution) -> Result<Vec<Point>> {
+pub fn linear_simd(points: &[Point], target_times: &[DateTime<Utc>], _resolution: Resolution) -> Result<Vec<Point>> {
 	if points.len() < 2 {
 		bail!(Error::InsufficientPointsError);
 	}
@@ -64,9 +64,17 @@ pub fn linear_simd(points: &[Point], target_times: &[DateTime<Utc>], resolution:
 	}
 
 	let base_time = points[0].timestamp;
-	let input_times: Vec<f64> = points.iter().map(|p| f64::from_i64(resolution.difference(&p.timestamp, &base_time).unwrap_or(0)).unwrap_or_default()).collect();
+
+	// Use nanoseconds for internal time calculations to avoid integer division issues
+	// (e.g., minute data with Years resolution = 0). Nanoseconds provide sufficient
+	// precision for interpolation while staying within f64 range.
+	let input_times: Vec<f64> = points.iter()
+		.map(|p| (p.timestamp - base_time).num_nanoseconds().unwrap_or(0) as f64)
+		.collect();
 	let input_values: Vec<f64> = points.iter().map(|p| round_to_places(p.value.to_f64().unwrap_or(0.0), 10)).collect();
-	let targets: Vec<f64> = target_times.iter().map(|t| f64::from_i64(resolution.difference(t, &base_time).unwrap_or(0)).unwrap_or_default()).collect();
+	let targets: Vec<f64> = target_times.iter()
+		.map(|t| (*t - base_time).num_nanoseconds().unwrap_or(0) as f64)
+		.collect();
 
 	let mut results = Vec::with_capacity(target_times.len());
 
@@ -119,7 +127,7 @@ fn simd_linear_interpolate(input_times: &[f64], input_values: &[f64], target_tim
 		};
 		results[i] = round_to_places(result, 10);
 	}
-	f64x4::new(results) // Changed from f64x4::from_array to f64x4::new
+	f64x4::new(results)
 }
 
 fn round_to_places(value: f64, places: i32) -> f64 {

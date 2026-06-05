@@ -2,119 +2,89 @@ use anyhow::{Context, Result};
 use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive};
 use chrono::{DateTime, Utc};
 
-use crate::{
-	Point, Resolution, splines::{DAYS_IN_MONTH, DAYS_IN_YEAR}
-};
+use crate::{Point, Resolution};
 
-pub async fn get_max_buffer_size() -> Result<u64> {
-	let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-	let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.unwrap();
-	let limits = adapter.limits();
-	Ok(limits.max_buffer_size)
-}
+// NOTE: get_max_buffer_size removed - use GpuInterpolator::get_max_buffer_size_static() instead
+// The old function was creating a new wgpu Instance per call, causing massive overhead.
 
-pub fn convert_points_to_gpu_format_f64(points: &[Point], resolution: Resolution) -> Result<(Vec<f64>, Vec<f64>)> {
+pub fn convert_points_to_gpu_format_f64(points: &[Point], _resolution: Resolution) -> Result<(Vec<f64>, Vec<f64>)> {
 	if points.is_empty() {
 		return Ok((Vec::new(), Vec::new()));
 	}
 
-	let base_time = points[0].timestamp;
-	let mut times = Vec::with_capacity(points.len());
-	let mut values = Vec::with_capacity(points.len());
+	// Sort points by timestamp to match CPU/parallel implementations
+	let mut sorted_points = points.to_vec();
+	sorted_points.sort_by_key(|p| p.timestamp);
 
-	for point in points {
+	let base_time = sorted_points[0].timestamp;
+	let mut times = Vec::with_capacity(sorted_points.len());
+	let mut values = Vec::with_capacity(sorted_points.len());
+
+	for point in &sorted_points {
 		let duration = point.timestamp.signed_duration_since(base_time);
-		let time_offset = match resolution {
-			Resolution::Nanoseconds => duration.num_nanoseconds().context("Invalid duration")?,
-			Resolution::Microseconds => duration.num_microseconds().context("Invalid duration")?,
-			Resolution::Milliseconds => duration.num_milliseconds(),
-			Resolution::Seconds => duration.num_seconds(),
-			Resolution::Minutes => duration.num_minutes(),
-			Resolution::Hours => duration.num_hours(),
-			Resolution::Days => duration.num_days(),
-			Resolution::Weeks => duration.num_weeks(),
-			Resolution::Months => duration.num_days() / DAYS_IN_MONTH,
-			Resolution::Years => duration.num_days() / DAYS_IN_YEAR,
-		};
+		// Use nanoseconds for internal time calculations to avoid integer division issues
+		// (e.g., minute data with Years resolution = 0). Nanoseconds provide sufficient
+		// precision for interpolation while staying within f64 range.
+		let time_offset = duration.num_nanoseconds().context("Invalid duration")?;
 		let time_offset = f64::from_i64(time_offset).context("Invalid time offset")?;
 		times.push(time_offset);
 		let value = point.value.to_f64().context("Invalid value")?;
-		values.push(value.clamp(-1e6, 1e6)); // Normalize values to prevent overflow
+		values.push(value); // Don't clamp - preserve full precision
 	}
 
 	Ok((times, values))
 }
 
-pub fn convert_points_to_gpu_format_f32(points: &[Point], resolution: Resolution) -> Result<(Vec<f32>, Vec<f32>)> {
+pub fn convert_points_to_gpu_format_f32(points: &[Point], _resolution: Resolution) -> Result<(Vec<f32>, Vec<f32>)> {
 	if points.is_empty() {
 		return Ok((Vec::new(), Vec::new()));
 	}
 
-	let base_time = points[0].timestamp;
-	let mut times = Vec::with_capacity(points.len());
-	let mut values = Vec::with_capacity(points.len());
+	// Sort points by timestamp to match CPU/parallel implementations
+	let mut sorted_points = points.to_vec();
+	sorted_points.sort_by_key(|p| p.timestamp);
 
-	for point in points {
+	let base_time = sorted_points[0].timestamp;
+	let mut times = Vec::with_capacity(sorted_points.len());
+	let mut values = Vec::with_capacity(sorted_points.len());
+
+	for point in &sorted_points {
 		let duration = point.timestamp.signed_duration_since(base_time);
-		let time_offset = match resolution {
-			Resolution::Nanoseconds => duration.num_nanoseconds().context("Invalid duration")?,
-			Resolution::Microseconds => duration.num_microseconds().context("Invalid duration")?,
-			Resolution::Milliseconds => duration.num_milliseconds(),
-			Resolution::Seconds => duration.num_seconds(),
-			Resolution::Minutes => duration.num_minutes(),
-			Resolution::Hours => duration.num_hours(),
-			Resolution::Days => duration.num_days(),
-			Resolution::Weeks => duration.num_weeks(),
-			Resolution::Months => duration.num_days() / DAYS_IN_MONTH,
-			Resolution::Years => duration.num_days() / DAYS_IN_YEAR,
-		};
+		// Use nanoseconds for internal time calculations to avoid integer division issues
+		// (e.g., minute data with Years resolution = 0). Nanoseconds provide sufficient
+		// precision for interpolation while staying within f64 range, then convert to f32.
+		let time_offset = duration.num_nanoseconds().context("Invalid duration")?;
 		let time_offset = f32::from_i64(time_offset).context("Invalid time offset")?;
 		times.push(time_offset);
 		let value = point.value.to_f32().context("Invalid value")?;
-		values.push(value.clamp(-1e6, 1e6)); // Normalize values to prevent overflow
+		values.push(value); // Don't clamp - preserve full precision
 	}
 
 	Ok((times, values))
 }
 
-pub fn convert_datetimes_to_gpu_format_f64(target_times: &[DateTime<Utc>], resolution: Resolution, base_time: DateTime<Utc>) -> Result<Vec<f64>> {
+pub fn convert_datetimes_to_gpu_format_f64(target_times: &[DateTime<Utc>], _resolution: Resolution, base_time: DateTime<Utc>) -> Result<Vec<f64>> {
 	let mut times = Vec::with_capacity(target_times.len());
 	for &target_time in target_times {
 		let duration = target_time.signed_duration_since(base_time);
-		let time_offset = match resolution {
-			Resolution::Nanoseconds => duration.num_nanoseconds().context("Invalid duration")?,
-			Resolution::Microseconds => duration.num_microseconds().context("Invalid duration")?,
-			Resolution::Milliseconds => duration.num_milliseconds(),
-			Resolution::Seconds => duration.num_seconds(),
-			Resolution::Minutes => duration.num_minutes(),
-			Resolution::Hours => duration.num_hours(),
-			Resolution::Days => duration.num_days(),
-			Resolution::Weeks => duration.num_weeks(),
-			Resolution::Months => duration.num_days() / DAYS_IN_MONTH,
-			Resolution::Years => duration.num_days() / DAYS_IN_YEAR,
-		};
+		// Use nanoseconds for internal time calculations to avoid integer division issues
+		// (e.g., minute data with Years resolution = 0). Nanoseconds provide sufficient
+		// precision for interpolation while staying within f64 range.
+		let time_offset = duration.num_nanoseconds().context("Invalid duration")?;
 		let time_offset = f64::from_i64(time_offset).context("Invalid time offset")?;
 		times.push(time_offset);
 	}
 	Ok(times)
 }
 
-pub fn convert_datetimes_to_gpu_format_f32(target_times: &[DateTime<Utc>], resolution: Resolution, base_time: DateTime<Utc>) -> Result<Vec<f32>> {
+pub fn convert_datetimes_to_gpu_format_f32(target_times: &[DateTime<Utc>], _resolution: Resolution, base_time: DateTime<Utc>) -> Result<Vec<f32>> {
 	let mut times = Vec::with_capacity(target_times.len());
 	for &target_time in target_times {
 		let duration = target_time.signed_duration_since(base_time);
-		let time_offset = match resolution {
-			Resolution::Nanoseconds => duration.num_nanoseconds().context("Invalid duration")?,
-			Resolution::Microseconds => duration.num_microseconds().context("Invalid duration")?,
-			Resolution::Milliseconds => duration.num_milliseconds(),
-			Resolution::Seconds => duration.num_seconds(),
-			Resolution::Minutes => duration.num_minutes(),
-			Resolution::Hours => duration.num_hours(),
-			Resolution::Days => duration.num_days(),
-			Resolution::Weeks => duration.num_weeks(),
-			Resolution::Months => duration.num_days() / DAYS_IN_MONTH,
-			Resolution::Years => duration.num_days() / DAYS_IN_YEAR,
-		};
+		// Use nanoseconds for internal time calculations to avoid integer division issues
+		// (e.g., minute data with Years resolution = 0). Nanoseconds provide sufficient
+		// precision for interpolation while staying within f64 range, then convert to f32.
+		let time_offset = duration.num_nanoseconds().context("Invalid duration")?;
 		let time_offset = f32::from_i64(time_offset).context("Invalid time offset")?;
 		times.push(time_offset);
 	}

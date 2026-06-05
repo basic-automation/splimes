@@ -1,9 +1,9 @@
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Duration, Utc};
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use splimes::{Point, Resolution, Spline, auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate};
+use splimes::{auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate, prewarm_gpu, Point, Resolution, Spline};
 use tokio::runtime::Runtime;
 
 // Helper function to generate test data
@@ -23,7 +23,17 @@ fn generate_test_data(input_size: usize, start: DateTime<Utc>, _resolution: Reso
 }
 
 fn bench_interpolation(c: &mut Criterion) {
-	let rt = Runtime::new().unwrap(); // Create Tokio runtime for async benchmarks
+	// Pre-warm GPU before benchmarks to measure actual interpolation performance
+	// (not GPU initialization time). See gpu_cold/gpu_prewarm benchmarks for init timing.
+	use std::time::Instant;
+	println!("\n=== Pre-warming GPU ===");
+	let prewarm_start = Instant::now();
+	match prewarm_gpu() {
+		Ok(()) => println!("prewarm_gpu() completed in {:.3}s", prewarm_start.elapsed().as_secs_f64()),
+		Err(e) => println!("prewarm_gpu() FAILED: {}", e),
+	}
+
+	let rt = Runtime::new().unwrap();
 
 	let mut group = c.benchmark_group("Interpolation Strategies");
 	group.warm_up_time(std::time::Duration::from_secs(3));
@@ -34,7 +44,7 @@ fn bench_interpolation(c: &mut Criterion) {
 	// Ultra-small test sizes for faster benchmarks
 	let sizes = vec![10, 50, 100, 500, 1_000, 10_000]; // Removed very large sizes
 	let resolution = Resolution::Minutes; // Use coarser resolution
-	let spline = Spline::Cubic; // Start with linear for simpler testing
+	let spline = Spline::Cubic;
 
 	for size in sizes {
 		let start = Utc::now();
@@ -69,7 +79,7 @@ fn bench_interpolation(c: &mut Criterion) {
 			});
 		});
 
-		// Benchmark GPU
+		// Benchmark GPU (pre-warmed)
 		group.bench_with_input(BenchmarkId::new("GPU", format!("{size}_in_{estimated_output}_out")), &size, |b, &size| {
 			b.iter(|| {
 				let (mut points, bench_start, bench_end) = generate_test_data(size, start, resolution);
@@ -80,7 +90,7 @@ fn bench_interpolation(c: &mut Criterion) {
 			});
 		});
 
-		// Benchmark Auto
+		// Benchmark Auto (pre-warmed)
 		group.bench_with_input(BenchmarkId::new("Auto", format!("{size}_in_{estimated_output}_out")), &size, |b, &size| {
 			b.iter(|| {
 				let (mut points, bench_start, bench_end) = generate_test_data(size, start, resolution);

@@ -1,13 +1,13 @@
 use std::io::Write;
 
-use anyhow::{Result, bail};
-use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, Zero};
+use anyhow::{bail, Result};
+use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive};
 use chrono::{DateTime, Utc};
 use wide::f64x4;
 
 use super::SIMD_BATCH_SIZE;
 use crate::{
-	Error, Point, Resolution, Spline, helpers::{InterpolationState, batch}
+	helpers::{batch, InterpolationState}, Error, Point, Resolution, Spline
 };
 
 pub async fn cubic(points: &mut [Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: &Resolution) -> Result<Vec<Point>> {
@@ -27,10 +27,14 @@ pub async fn cubic_interpolate(state: &mut InterpolationState) -> Result<()> {
 		state.result = Some(Vec::new());
 	}
 
+	// Sort points by timestamp to match GPU/SIMD behavior
+	let mut sorted_points = input_points.clone();
+	sorted_points.sort_by_key(|p| p.timestamp);
+
 	for current_time in batch_times {
-		let value = evaluate_lagrange_cubic(input_points, *current_time, state.resolution);
-		if state.temp_file.is_none() {
-			state.result.as_mut().unwrap().push(Point { timestamp: *current_time, value });
+		let value = evaluate_lagrange_cubic(&sorted_points, *current_time, state.resolution)?;
+		if let Some(result) = state.result.as_mut() {
+			result.push(Point { timestamp: *current_time, value });
 		} else if let Some(writer) = state.temp_file.as_mut() {
 			writeln!(writer.lock().await, "{},{}", current_time.to_rfc3339(), value)?;
 		}
@@ -57,8 +61,8 @@ pub fn cubic_simd(points: &[Point], target_times: &[DateTime<Utc>], resolution: 
 
 	let base_time = sorted_points[0].timestamp;
 	#[allow(clippy::cast_precision_loss)]
-	let point_times: Vec<f64> = sorted_points.iter().map(|p| timestamp_to_f64(p.timestamp, base_time, resolution)).collect();
-	let point_values: Vec<f64> = sorted_points.iter().map(|p| round_to_places(p.value.to_f64().unwrap_or(0.0), 10)).collect();
+	let point_times: Vec<f64> = sorted_points.iter().map(|p| resolution.difference(&p.timestamp, &base_time).map(|d| d as f64)).collect::<Result<Vec<f64>>>()?;
+	let point_values: Vec<f64> = sorted_points.iter().map(|p| p.value.to_f64().ok_or(Error::DecimalConversionError).map(|v| round_to_places(v, 10)).map_err(anyhow::Error::from)).collect::<Result<Vec<f64>>>()?;
 
 	let mut results = Vec::with_capacity(target_times.len());
 
@@ -67,7 +71,7 @@ pub fn cubic_simd(points: &[Point], target_times: &[DateTime<Utc>], resolution: 
 		let chunk_size = chunk.len();
 		#[allow(clippy::cast_precision_loss)]
 		for (i, target_time) in chunk.iter().enumerate() {
-			padded_targets[i] = timestamp_to_f64(*target_time, base_time, resolution);
+			padded_targets[i] = resolution.difference(target_time, &base_time)? as f64;
 		}
 		if chunk_size < SIMD_BATCH_SIZE {
 			let last_value = padded_targets[chunk_size - 1];
@@ -79,22 +83,22 @@ pub fn cubic_simd(points: &[Point], target_times: &[DateTime<Utc>], resolution: 
 
 		let result_array = result_vec.to_array();
 		for (i, &value) in result_array[..chunk_size].iter().enumerate() {
-			results.push(Point { timestamp: chunk[i], value: BigDecimal::from_f64(round_to_places(value, 10)).unwrap_or_else(BigDecimal::zero) });
+			results.push(Point { timestamp: chunk[i], value: BigDecimal::from_f64(round_to_places(value, 10)).ok_or(Error::DecimalConversionError)? });
 		}
 	}
 
 	Ok(results)
 }
 
-fn evaluate_lagrange_cubic(points: &[Point], target_time: DateTime<Utc>, resolution: Resolution) -> BigDecimal {
+fn evaluate_lagrange_cubic(points: &[Point], target_time: DateTime<Utc>, resolution: Resolution) -> Result<BigDecimal> {
 	let n = points.len();
 
 	if target_time <= points[0].timestamp {
-		return points[0].value.clone();
+		return Ok(points[0].value.clone());
 	}
 
 	if target_time >= points[n - 1].timestamp {
-		return points[n - 1].value.clone();
+		return Ok(points[n - 1].value.clone());
 	}
 
 	let segment_idx = find_segment(points, target_time);
@@ -105,21 +109,20 @@ fn evaluate_lagrange_cubic(points: &[Point], target_time: DateTime<Utc>, resolut
 	let (final_i0, final_i1, final_i2, final_i3) = if i3 >= n { (n - 4, n - 3, n - 2, n - 1) } else { (i0, i1, i2, i3) };
 
 	let base_time = points[final_i0].timestamp;
-	let t0 = timestamp_to_f64(points[final_i0].timestamp, base_time, resolution);
-	let t1 = timestamp_to_f64(points[final_i1].timestamp, base_time, resolution);
-	let t2 = timestamp_to_f64(points[final_i2].timestamp, base_time, resolution);
-	let t3 = timestamp_to_f64(points[final_i3].timestamp, base_time, resolution);
-	let target_t = timestamp_to_f64(target_time, base_time, resolution);
-
-	let v0 = points[final_i0].value.to_f64().unwrap_or(0.0);
-	let v1 = points[final_i1].value.to_f64().unwrap_or(0.0);
-	let v2 = points[final_i2].value.to_f64().unwrap_or(0.0);
-	let v3 = points[final_i3].value.to_f64().unwrap_or(0.0);
+	let t0 = resolution.difference(&points[final_i0].timestamp, &base_time)? as f64;
+	let t1 = resolution.difference(&points[final_i1].timestamp, &base_time)? as f64;
+	let t2 = resolution.difference(&points[final_i2].timestamp, &base_time)? as f64;
+	let t3 = resolution.difference(&points[final_i3].timestamp, &base_time)? as f64;
+	let target_t = resolution.difference(&target_time, &base_time)? as f64;
+	let v0 = points[final_i0].value.to_f64().ok_or(Error::DecimalConversionError)?;
+	let v1 = points[final_i1].value.to_f64().ok_or(Error::DecimalConversionError)?;
+	let v2 = points[final_i2].value.to_f64().ok_or(Error::DecimalConversionError)?;
+	let v3 = points[final_i3].value.to_f64().ok_or(Error::DecimalConversionError)?;
 
 	let t = [t0, t1, t2, t3];
 	let v = [v0, v1, v2, v3];
 	let result = cubic_interpolate_lagrange(target_t, &t, &v);
-	BigDecimal::from_f64(result).unwrap_or_else(BigDecimal::zero)
+	Ok(BigDecimal::from_f64(result).ok_or(Error::DecimalConversionError)?)
 }
 
 fn evaluate_lagrange_cubic_simd(times: &[f64], values: &[f64], target_times: f64x4) -> f64x4 {
@@ -196,23 +199,6 @@ fn find_segment_f64_binary(times: &[f64], target_time: f64) -> usize {
 	}
 
 	left
-}
-
-fn timestamp_to_f64(timestamp: DateTime<Utc>, base_time: DateTime<Utc>, resolution: Resolution) -> f64 {
-	let duration = timestamp - base_time;
-	let res = match resolution {
-		Resolution::Nanoseconds => duration.num_nanoseconds().map_or(0, |v| v),
-		Resolution::Microseconds => duration.num_microseconds().map_or(0, |v| v),
-		Resolution::Milliseconds => duration.num_milliseconds(),
-		Resolution::Seconds => duration.num_seconds(),
-		Resolution::Minutes => duration.num_minutes(),
-		Resolution::Hours => duration.num_hours(),
-		Resolution::Days => duration.num_days(),
-		Resolution::Weeks => duration.num_weeks(),
-		Resolution::Months => duration.num_days() / super::types::DAYS_IN_MONTH,
-		Resolution::Years => duration.num_days() / super::types::DAYS_IN_YEAR,
-	};
-	f64::from_i64(res).unwrap_or_default()
 }
 
 fn round_to_places(value: f64, places: i32) -> f64 {

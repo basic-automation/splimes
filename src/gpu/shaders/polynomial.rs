@@ -103,20 +103,39 @@ fn select_window(target_time: f32, num_points: u32) -> u32 {
         return 0u;
     }
     
+    if (target_time <= input_times[0]) {
+        return 0u;
+    }
+    
+    if (target_time >= input_times[input_count - 1u]) {
+        if (input_count > num_points) {
+            return input_count - num_points;
+        } else {
+            return 0u;
+        }
+    }
+    
+    // Find the first index where input_times[i] >= target_time
+    // This matches Rust's partition_point(|&t| t < target_time)
     var insert_pos = 0u;
     for (var i = 0u; i < input_count; i++) {
-        if (input_times[i] <= target_time) {
+        if (input_times[i] < target_time) {
             insert_pos = i + 1u;
-        } else {
-            break;
         }
     }
     
     let half_window = num_points / 2u;
-    var start_idx = insert_pos - min(insert_pos, half_window);
     
-    if (start_idx + num_points > input_count) {
-        start_idx = input_count - num_points;
+    var start_idx = 0u;
+    if (insert_pos > half_window) {
+        start_idx = insert_pos - half_window;
+    }
+    
+    let end_candidate = start_idx + num_points;
+    let clamped_end = min(end_candidate, input_count);
+    
+    if (clamped_end > num_points) {
+        start_idx = clamped_end - num_points;
     }
     
     return start_idx;
@@ -124,7 +143,6 @@ fn select_window(target_time: f32, num_points: u32) -> u32 {
 
 fn lagrange_interpolate(target_time: f32, start_idx: u32, num_points: u32) -> f32 {
     var result = 0.0;
-    var has_near_zero_denominator = false;
     
     for (var j = 0u; j < num_points; j++) {
         let j_idx = start_idx + j;
@@ -132,6 +150,7 @@ fn lagrange_interpolate(target_time: f32, start_idx: u32, num_points: u32) -> f3
         let yj = input_values[j_idx];
         
         var basis = 1.0;
+        var valid_basis = true;
         
         for (var k = 0u; k < num_points; k++) {
             if (k != j) {
@@ -140,26 +159,16 @@ fn lagrange_interpolate(target_time: f32, start_idx: u32, num_points: u32) -> f3
                 let denominator = tj - tk;
                 
                 if (abs(denominator) < 1e-12) {
-                    has_near_zero_denominator = true;
-                    break;
+                    valid_basis = false;
+                } else {
+                    basis *= (target_time - tk) / denominator;
                 }
-                
-                basis *= (target_time - tk) / denominator;
             }
         }
         
-        if (!has_near_zero_denominator) {
+        if (valid_basis) {
             result += yj * basis;
         }
-    }
-    
-    if (has_near_zero_denominator && num_points >= 2u && config.max_degree == 1u) {
-        let t1 = input_times[start_idx];
-        let t2 = input_times[start_idx + 1u];
-        let v1 = input_values[start_idx];
-        let v2 = input_values[start_idx + 1u];
-        let t_norm = (target_time - t1) / max(t2 - t1, 1e-12);
-        result = v1 + t_norm * (v2 - v1);
     }
     
     return result;
@@ -300,20 +309,39 @@ fn select_window(target_time: f64, num_points: u32) -> u32 {
         return 0u;
     }
     
+    if (target_time <= input_times[0]) {
+        return 0u;
+    }
+    
+    if (target_time >= input_times[input_count - 1u]) {
+        if (input_count > num_points) {
+            return input_count - num_points;
+        } else {
+            return 0u;
+        }
+    }
+    
+    // Find the first index where input_times[i] >= target_time
+    // This matches Rust's partition_point(|&t| t < target_time)
     var insert_pos = 0u;
     for (var i = 0u; i < input_count; i++) {
-        if (input_times[i] <= target_time) {
+        if (input_times[i] < target_time) {
             insert_pos = i + 1u;
-        } else {
-            break;
         }
     }
     
     let half_window = num_points / 2u;
-    var start_idx = insert_pos - min(insert_pos, half_window);
     
-    if (start_idx + num_points > input_count) {
-        start_idx = input_count - num_points;
+    var start_idx = 0u;
+    if (insert_pos > half_window) {
+        start_idx = insert_pos - half_window;
+    }
+    
+    let end_candidate = start_idx + num_points;
+    let clamped_end = min(end_candidate, input_count);
+    
+    if (clamped_end > num_points) {
+        start_idx = clamped_end - num_points;
     }
     
     return start_idx;
@@ -321,7 +349,6 @@ fn select_window(target_time: f64, num_points: u32) -> u32 {
 
 fn lagrange_interpolate(target_time: f64, start_idx: u32, num_points: u32) -> f64 {
     var result = f64(0.0);
-    var has_near_zero_denominator = false;
     
     for (var j = 0u; j < num_points; j++) {
         let j_idx = start_idx + j;
@@ -329,6 +356,7 @@ fn lagrange_interpolate(target_time: f64, start_idx: u32, num_points: u32) -> f6
         let yj = input_values[j_idx];
         
         var basis = f64(1.0);
+        var valid_basis = true;
         
         for (var k = 0u; k < num_points; k++) {
             if (k != j) {
@@ -337,26 +365,16 @@ fn lagrange_interpolate(target_time: f64, start_idx: u32, num_points: u32) -> f6
                 let denominator = tj - tk;
                 
                 if (abs(denominator) < f64(1e-12)) {
-                    has_near_zero_denominator = true;
-                    break;
+                    valid_basis = false;
+                } else {
+                    basis *= (target_time - tk) / denominator;
                 }
-                
-                basis *= (target_time - tk) / denominator;
             }
         }
         
-        if (!has_near_zero_denominator) {
+        if (valid_basis) {
             result += yj * basis;
         }
-    }
-    
-    if (has_near_zero_denominator && num_points >= 2u && config.max_degree == 1u) {
-        let t1 = input_times[start_idx];
-        let t2 = input_times[start_idx + 1u];
-        let v1 = input_values[start_idx];
-        let v2 = input_values[start_idx + 1u];
-        let t_norm = (target_time - t1) / max(t2 - t1, f64(1e-12));
-        result = v1 + t_norm * (v2 - v1);
     }
     
     return result;

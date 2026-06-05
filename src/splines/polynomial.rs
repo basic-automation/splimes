@@ -1,13 +1,13 @@
 use std::io::Write;
 
-use anyhow::{Result, bail};
-use bigdecimal::{BigDecimal, FromPrimitive, One, ToPrimitive, Zero};
+use anyhow::{bail, Result};
+use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, Zero};
 use chrono::{DateTime, Utc};
 use wide::f64x4;
 
 use super::SIMD_BATCH_SIZE;
 use crate::{
-	Error, Point, Resolution, Spline, helpers::{InterpolationState, batch}
+	helpers::{batch, InterpolationState}, Error, Point, Resolution, Spline
 };
 
 pub async fn polynomial(points: &mut [Point], start: &DateTime<Utc>, end: &DateTime<Utc>, resolution: &Resolution, spline: &Spline) -> Result<Vec<Point>> {
@@ -31,7 +31,10 @@ pub async fn polynomial_interpolate(state: &mut InterpolationState) -> Result<()
 		state.result = Some(Vec::new());
 	}
 
-	let deduplicated_points = deduplicate_points(input_points.clone());
+	// Sort the input points just like polynomial_simd does to ensure consistent results
+	let mut sorted_points = input_points.clone();
+	sorted_points.sort_by_key(|p| p.timestamp);
+	let deduplicated_points = deduplicate_points(sorted_points);
 	if deduplicated_points.len() < state.spline.degree() + 1 {
 		bail!(Error::InsufficientPointsError);
 	}
@@ -41,7 +44,7 @@ pub async fn polynomial_interpolate(state: &mut InterpolationState) -> Result<()
 		let value = evaluate_polynomial_safe(&deduplicated_points, *current_time, state.resolution, &state.spline)?;
 
 		if state.temp_file.is_none() {
-			state.result.as_mut().unwrap().push(Point { timestamp: *current_time, value });
+			state.result.as_mut().ok_or_else(|| Error::ConversionError("Result not initialized".to_string()))?.push(Point { timestamp: *current_time, value });
 		} else if let Some(writer) = state.temp_file.as_mut() {
 			writeln!(writer.lock().await, "{},{}", current_time.to_rfc3339(), value)?;
 		}
@@ -82,8 +85,10 @@ pub fn polynomial_simd(points: &[Point], target_times: &[DateTime<Utc>], resolut
 		bail!(Error::InsufficientPointsError);
 	}
 
-	// Remove the redundant safe_degree calculation since the wrapper function calculates it
 	let base_time = deduplicated_points[0].timestamp;
+
+	let times: Vec<f64> = deduplicated_points.iter().map(|p| resolution.difference(&p.timestamp, &base_time).map(|d| d as f64)).collect::<Result<Vec<f64>>>()?;
+	let values: Vec<f64> = deduplicated_points.iter().map(|p| p.value.to_f64().ok_or(Error::DecimalConversionError).map_err(anyhow::Error::from)).collect::<Result<Vec<f64>>>()?;
 
 	let mut results = Vec::with_capacity(target_times.len());
 
@@ -92,7 +97,7 @@ pub fn polynomial_simd(points: &[Point], target_times: &[DateTime<Utc>], resolut
 		let chunk_size = chunk.len();
 
 		for (i, target_time) in chunk.iter().enumerate() {
-			padded_targets[i] = timestamp_to_f64(*target_time, base_time, resolution)?;
+			padded_targets[i] = resolution.difference(target_time, &base_time).map(|d| d as f64)?;
 		}
 
 		if chunk_size < SIMD_BATCH_SIZE {
@@ -100,16 +105,13 @@ pub fn polynomial_simd(points: &[Point], target_times: &[DateTime<Utc>], resolut
 			padded_targets[chunk_size..].fill(last_value);
 		}
 
-		let times: Vec<f64> = deduplicated_points.iter().map(|p| timestamp_to_f64(p.timestamp, base_time, resolution).unwrap_or(0.0)).collect();
-		let values: Vec<f64> = deduplicated_points.iter().map(|p| p.value.to_f64().unwrap_or(0.0)).collect();
-
 		let target_simd = f64x4::from(padded_targets);
 		// Use the wrapper function - it will calculate safe_degree internally
 		let result_simd = evaluate_polynomial_simd(&deduplicated_points, &times, &values, target_simd, spline);
 
 		let result_array = result_simd.to_array();
 		for (i, &value) in result_array.iter().take(chunk_size).enumerate() {
-			results.push(Point { timestamp: chunk[i], value: BigDecimal::from_f64(value).unwrap_or_else(BigDecimal::zero) });
+			results.push(Point { timestamp: chunk[i], value: BigDecimal::from_f64(value).ok_or(Error::DecimalConversionError)? });
 		}
 	}
 
@@ -121,48 +123,71 @@ fn evaluate_polynomial_safe_with_degree(points: &[Point], target_time: DateTime<
 		return Ok(point.value.clone());
 	}
 
-	let is_extrapolation = is_extrapolating(points, target_time);
-	let selected_points = select_nearest_points_adaptive(points, target_time, degree + 1);
-	let time_values = get_normalized_time_values(selected_points, target_time, resolution)?;
-	let target_x = time_values.target_normalized;
-	let mut total = BigDecimal::zero();
+	// Convert points to f64 arrays matching SIMD implementation
+	let base_time = points[0].timestamp;
+	let times: Vec<f64> = points.iter().map(|p| resolution.difference(&p.timestamp, &base_time).map(|d| d as f64)).collect::<Result<Vec<f64>, _>>()?;
+	let values: Vec<f64> = points.iter().map(|p| p.value.to_f64().ok_or(Error::DecimalConversionError).map_err(anyhow::Error::from)).collect::<Result<Vec<f64>, _>>()?;
 
-	for j in 0..selected_points.len() {
-		let mut numerator = BigDecimal::one();
-		let mut denominator = BigDecimal::one();
+	let target_time_normalized = resolution.difference(&target_time, &base_time).map(|d| d as f64)?;
+	let n = points.len();
+	let num_points = degree + 1;
 
-		for k in 0..selected_points.len() {
-			if j != k {
-				// Use compound assignment operators
-				numerator *= &target_x - &time_values.points_normalized[k];
-				denominator *= &time_values.points_normalized[j] - &time_values.points_normalized[k];
-			}
-		}
+	// Use the same point selection logic as SIMD
+	let nearest_idx = if target_time_normalized <= times[0] {
+		0
+	} else if target_time_normalized >= times[n - 1] {
+		n.saturating_sub(num_points)
+	} else {
+		let insert_pos = times.partition_point(|&t| t < target_time_normalized);
+		let half_window = num_points / 2;
+		let start_idx = insert_pos.saturating_sub(half_window);
+		(start_idx + num_points).min(n).saturating_sub(num_points)
+	};
 
-		if !denominator.is_zero() {
-			// Use compound assignment operator
-			total += &selected_points[j].value * &numerator / &denominator;
-		}
-	}
+	let end_idx = (nearest_idx + num_points).min(n);
+	let window_times = &times[nearest_idx..end_idx];
+	let window_values = &values[nearest_idx..end_idx];
 
-	// Linear fallback for degenerate cases
-	if selected_points.len() == 2 && degree > 1 {
-		let p0 = &selected_points[0];
-		let p1 = &selected_points[1];
-		let t0 = time_values.points_normalized[0].to_f64().unwrap_or(0.0);
-		let t1 = time_values.points_normalized[1].to_f64().unwrap_or(0.0);
-		let v0 = p0.value.to_f64().unwrap_or(0.0);
-		let v1 = p1.value.to_f64().unwrap_or(0.0);
-		let t_norm = target_x.to_f64().unwrap_or(0.0);
+	let is_extrapolation = target_time_normalized < times[0] || target_time_normalized > times[n - 1];
+
+	#[allow(clippy::comparison_chain)] // if-chain is more readable here than match with Ordering
+	let mut total = if window_times.len() == 2 {
+		// Linear interpolation for 2-point window
+		let t0 = window_times[0];
+		let t1 = window_times[1];
+		let v0 = window_values[0];
+		let v1 = window_values[1];
 
 		if (t1 - t0).abs() > f64::EPSILON {
-			let normalized_t = (t_norm - t0) / (t1 - t0);
-			total = BigDecimal::from_f64(normalized_t.mul_add(v1 - v0, v0)).unwrap_or_else(BigDecimal::zero);
+			let alpha = (target_time_normalized - t0) / (t1 - t0);
+			BigDecimal::from_f64(alpha.mul_add(v1 - v0, v0)).ok_or(Error::DecimalConversionError)?
+		} else {
+			BigDecimal::from_f64(v0).ok_or(Error::DecimalConversionError)?
 		}
-	}
+	} else if window_times.len() > 2 {
+		// Lagrange interpolation for 3+ points
+		let mut total = BigDecimal::zero();
+		for j in 0..window_times.len() {
+			let mut term = BigDecimal::from_f64(window_values[j]).ok_or(Error::DecimalConversionError)?;
+			for k in 0..window_times.len() {
+				if j != k {
+					let numerator = BigDecimal::from_f64(target_time_normalized - window_times[k]).ok_or(Error::DecimalConversionError)?;
+					let denominator = BigDecimal::from_f64(window_times[j] - window_times[k]).ok_or(Error::DecimalConversionError)?;
+
+					if !denominator.is_zero() {
+						term *= &numerator / &denominator;
+					}
+				}
+			}
+			total += term;
+		}
+		total
+	} else {
+		BigDecimal::from_f64(window_values[0]).ok_or(Error::DecimalConversionError)?
+	};
 
 	if is_extrapolation && spline.bounds_factor().is_some() {
-		total = apply_extrapolation_bounds(points, total, spline.bounds_factor().unwrap());
+		total = apply_extrapolation_bounds(points, total, spline.bounds_factor().ok_or_else(|| Error::ConversionError("No bounds factor".to_string()))?)?;
 	}
 
 	Ok(total)
@@ -272,57 +297,19 @@ fn determine_safe_degree(requested_degree: usize, available_points: usize) -> us
 	max_degree_by_points.min(requested_degree).min(stability_cap)
 }
 
-fn is_extrapolating(points: &[Point], target_time: DateTime<Utc>) -> bool {
-	target_time < points[0].timestamp || target_time > points[points.len() - 1].timestamp
-}
-
-fn select_nearest_points_adaptive(points: &[Point], target_time: DateTime<Utc>, num_points: usize) -> &[Point] {
-	let n = points.len();
-	if num_points >= n {
-		return points;
-	}
-
-	let insert_pos = points.partition_point(|p| p.timestamp < target_time);
-	let half_window = num_points / 2;
-	let start_idx = insert_pos.saturating_sub(half_window);
-	let adjusted_start = (start_idx + num_points).min(n).saturating_sub(num_points);
-	let end_idx = (adjusted_start + num_points).min(n);
-	&points[adjusted_start..end_idx]
-}
-
-fn get_normalized_time_values(points: &[Point], target_time: DateTime<Utc>, resolution: Resolution) -> Result<NormalizedTimeValues> {
-	let base_time = points[0].timestamp;
-	let target_normalized = BigDecimal::from_i64(resolution.difference(&target_time, &base_time).map_err(|_| Error::DecimalConversionError)?).ok_or(Error::DecimalConversionError)?;
-	let points_normalized = points.iter().map(|p| BigDecimal::from_i64(resolution.difference(&p.timestamp, &base_time).map_err(|_| Error::DecimalConversionError)?).ok_or(Error::DecimalConversionError)).collect::<Result<Vec<BigDecimal>, _>>()?;
-	Ok(NormalizedTimeValues { target_normalized, points_normalized })
-}
-
-struct NormalizedTimeValues {
-	target_normalized: BigDecimal,
-	points_normalized: Vec<BigDecimal>,
-}
-
-fn apply_extrapolation_bounds(points: &[Point], value: BigDecimal, bounds_factor: f64) -> BigDecimal {
-	let min_value = points.iter().map(|p| &p.value).min_by(std::cmp::Ord::cmp).unwrap();
-	let max_value = points.iter().map(|p| &p.value).max_by(std::cmp::Ord::cmp).unwrap();
-	let range = max_value - min_value;
-	let bounds_factor_bd = BigDecimal::from_f64(bounds_factor).unwrap_or_else(BigDecimal::zero);
+fn apply_extrapolation_bounds(points: &[Point], value: BigDecimal, bounds_factor: f64) -> Result<BigDecimal> {
+	let min_value = points.iter().map(|p| &p.value).min().ok_or_else(|| Error::ConversionError("No points".to_string()))?.clone();
+	let max_value = points.iter().map(|p| &p.value).max().ok_or_else(|| Error::ConversionError("No points".to_string()))?.clone();
+	let range = max_value.clone() - min_value.clone();
+	let bounds_factor_bd = BigDecimal::from_f64(bounds_factor).ok_or(Error::DecimalConversionError)?;
 	let lower_bound = min_value - &range * &bounds_factor_bd;
 	let upper_bound = max_value + &range * &bounds_factor_bd;
 
 	if value < lower_bound {
-		lower_bound
+		Ok(lower_bound)
 	} else if value > upper_bound {
-		upper_bound
+		Ok(upper_bound)
 	} else {
-		value
+		Ok(value)
 	}
-}
-
-fn timestamp_to_f64(target_time: DateTime<Utc>, base_time: DateTime<Utc>, resolution: Resolution) -> Result<f64> {
-	// Address the precision loss warning by making it explicit and documented
-	#[allow(clippy::cast_precision_loss)]
-	// Note: This cast may lose precision for very large time differences, but this is acceptable
-	// for interpolation purposes where we need f64 for SIMD operations
-	Ok(resolution.difference(&target_time, &base_time).map_err(|_| Error::DecimalConversionError)? as f64)
 }

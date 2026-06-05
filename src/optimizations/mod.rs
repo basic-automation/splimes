@@ -1,12 +1,12 @@
 use std::io::Write;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use crate::{
-	Error, POINT_SIZE, Point, Resolution, Spline, generate_target_times, helpers::{InterpolationState, batch}, splines::{cubic, cubic_simd, linear, linear_simd, polynomial, polynomial_simd, quadratic, quadratic_simd}
+	generate_target_times, helpers::{batch, InterpolationState}, splines::{cubic, cubic_simd, linear, linear_simd, polynomial, polynomial_simd, quadratic, quadratic_simd}, Error, Point, Resolution, Spline, POINT_SIZE
 };
 
 mod fast_path;
@@ -68,7 +68,7 @@ pub async fn p_interpolate(state: &mut InterpolationState) -> Result<()> {
 		.par_iter()
 		.map(|times| match spline {
 			Spline::Linear => linear_simd(input_points_ref, times, resolution),
-			Spline::Quadratic => Ok(quadratic_simd(input_points_ref, times, resolution)),
+			Spline::Quadratic => quadratic_simd(input_points_ref, times, resolution),
 			Spline::Cubic => cubic_simd(input_points_ref, times, resolution),
 			Spline::Polynomial(_, _) => polynomial_simd(input_points_ref, times, resolution, &spline),
 		})
