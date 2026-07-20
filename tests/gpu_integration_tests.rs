@@ -3,47 +3,47 @@ use splimes::{
     prewarm_gpu, gpu_buffer_pool_stats, GpuConfig, prewarm_gpu_with_config,
 };
 
-#[test]
 #[serial(gpu_tests)]
+#[test]
 fn test_gpu_prewarm_succeeds() {
     let result = prewarm_gpu();
     assert!(result.is_ok(), "GPU prewarming should succeed");
 }
 
-#[test]
 #[serial(gpu_tests)]
+#[test]
 fn test_gpu_prewarm_with_default_config() {
     let config = GpuConfig::default();
     let result = prewarm_gpu_with_config(config);
     assert!(result.is_ok(), "GPU prewarming with default config should succeed");
 }
 
-#[test]
 #[serial(gpu_tests)]
+#[test]
 fn test_gpu_prewarm_with_low_memory_config() {
     let config = GpuConfig::low_memory();
     let result = prewarm_gpu_with_config(config);
     assert!(result.is_ok(), "GPU prewarming with low_memory config should succeed");
 }
 
-#[test]
 #[serial(gpu_tests)]
+#[test]
 fn test_gpu_prewarm_with_high_performance_config() {
     let config = GpuConfig::high_performance();
     let result = prewarm_gpu_with_config(config);
     assert!(result.is_ok(), "GPU prewarming with high_performance config should succeed");
 }
 
-#[test]
 #[serial(gpu_tests)]
+#[test]
 fn test_gpu_prewarm_with_minimal_config() {
     let config = GpuConfig::minimal();
     let result = prewarm_gpu_with_config(config);
     assert!(result.is_ok(), "GPU prewarming with minimal config should succeed");
 }
 
-#[test]
 #[serial(gpu_tests)]
+#[test]
 fn test_buffer_pool_stats_available() {
     // Ensure GPU is initialized
     let _ = prewarm_gpu();
@@ -59,8 +59,8 @@ fn test_buffer_pool_stats_available() {
         "Total allocated should be reasonable (< 1GB)");
 }
 
-#[test]
 #[serial(gpu_tests)]
+#[test]
 fn test_config_presets_are_different() {
     let default = GpuConfig::default();
     let low_mem = GpuConfig::low_memory();
@@ -92,8 +92,8 @@ fn test_config_presets_are_different() {
     );
 }
 
-#[test]
 #[serial(gpu_tests)]
+#[test]
 fn test_config_presets_ordered_by_resources() {
     let minimal = GpuConfig::minimal();
     let low_mem = GpuConfig::low_memory();
