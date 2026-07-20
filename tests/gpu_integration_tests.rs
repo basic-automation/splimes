@@ -1,3 +1,13 @@
+//! GPU prewarm / buffer-pool integration tests.
+//!
+//! ATTRIBUTE ORDER MATTERS HERE: `#[serial(gpu_tests)]` must stay ABOVE `#[test]`.
+//! With `#[test]` outermost, rustc's builtin harness injects its
+//! `rustc_test_entrypoint_marker` and the `#[serial]` proc macro then re-emits the item
+//! without that marker's tokens, and the compiler ICEs with "attribute is missing tokens"
+//! (rustc_ast/src/attr/mod.rs) — which made this whole target uncompilable and blocked
+//! `cargo test --workspace`. That is upstream rust-lang/rust#100263, open since 2022, so a
+//! toolchain bump will not save you. Keep the order.
+
 use serial_test::serial;
 use splimes::{
     prewarm_gpu, gpu_buffer_pool_stats, GpuConfig, prewarm_gpu_with_config,
