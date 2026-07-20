@@ -6,10 +6,23 @@ pub mod regression_tests {
 
 	use crate::{gpu::types::GpuInterpolator, gpu_interpolate, parallel_interpolate, splines::*, Point, Resolution};
 
+	/// The epoch every fixture point is measured from, fixed once per process.
+	///
+	/// [`get_deterministic_points`] is called several times per spline (once for each
+	/// backend), and it previously re-evaluated `Utc::now()` **per point, per call** — so
+	/// despite its name it returned a *different* dataset every time, with the ten
+	/// timestamps smeared microseconds apart and each backend receiving its own grid.
+	/// Since `start`/`end` are derived from the first call's points, that drift shifts the
+	/// target-time grid between backends and the output lengths/timestamps stop matching,
+	/// which is precisely what `test_regression_output_consistency` and
+	/// `test_regression_deterministic_output` were failing on. Anchoring every call to one
+	/// base makes the fixture live up to its name.
+	static BASE_TIME: std::sync::LazyLock<chrono::DateTime<Utc>> = std::sync::LazyLock::new(Utc::now);
+
 	/// Known deterministic test dataset with controlled values
 	/// This ensures tests produce the same output every time
 	fn get_deterministic_points() -> Vec<Point> {
-		vec![Point { timestamp: Utc::now(), value: bigdecimal::BigDecimal::from(-100) }, Point { timestamp: Utc::now() + chrono::Duration::seconds(10), value: bigdecimal::BigDecimal::from(-95) }, Point { timestamp: Utc::now() + chrono::Duration::seconds(20), value: bigdecimal::BigDecimal::from(-90) }, Point { timestamp: Utc::now() + chrono::Duration::seconds(30), value: bigdecimal::BigDecimal::from(-85) }, Point { timestamp: Utc::now() + chrono::Duration::seconds(40), value: bigdecimal::BigDecimal::from(-80) }, Point { timestamp: Utc::now() + chrono::Duration::seconds(50), value: bigdecimal::BigDecimal::from(-75) }, Point { timestamp: Utc::now() + chrono::Duration::seconds(60), value: bigdecimal::BigDecimal::from(-70) }, Point { timestamp: Utc::now() + chrono::Duration::seconds(70), value: bigdecimal::BigDecimal::from(-65) }, Point { timestamp: Utc::now() + chrono::Duration::seconds(80), value: bigdecimal::BigDecimal::from(-60) }, Point { timestamp: Utc::now() + chrono::Duration::seconds(90), value: bigdecimal::BigDecimal::from(-55) }]
+		(0..10).map(|i| Point { timestamp: *BASE_TIME + chrono::Duration::seconds(i * 10), value: BigDecimal::from(-100 + i * 5) }).collect()
 	}
 
 	/// Verify that all implementations produce consistent output counts and timestamps
