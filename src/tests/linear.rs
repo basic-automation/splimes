@@ -9,10 +9,31 @@ pub mod tests {
 
 	use crate::{auto_interpolate, gpu::types::GpuInterpolator, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::linear, tests::plot_terminal, Point, Resolution};
 
+	/// The shared interpolation fixture: ten points with **random values on strictly
+	/// separated knots**.
+	///
+	/// The timestamps are deliberately *not* random. `Point::random` draws its offset from
+	/// just 61 integer-second buckets (-30..=30) around `Utc::now()`, so ten independent
+	/// draws collide in the same second about half the time — and because each draw re-reads
+	/// `Utc::now()`, a collision yields two knots microseconds apart rather than identical
+	/// ones. At `Resolution::Seconds` that is a near-degenerate knot pair: the spline's
+	/// divided differences divide by a ~1e-6 s gap, the result blows up, and the run produces
+	/// garbage values (norms hundreds of times too large, cosine similarities going negative).
+	///
+	/// That is the mechanism behind the "flaky GPU interpolation tests" — the flakiness is
+	/// **input-driven, not GPU-specific**: every path (CPU-vs-SIMD included) fails on a bad
+	/// draw, and because this static is shared process-wide, one bad draw fails several tests
+	/// at once, which is exactly the observed clustering. Fixing the knots keeps the values
+	/// random (so the comparison still exercises real arithmetic) while removing the
+	/// degeneracy the engine was never being asked to handle.
 	pub static POINTS: LazyLock<Vec<Point>> = LazyLock::new(|| {
+		let base = Utc::now();
 		let mut points: Vec<Point> = Vec::new();
-		for _ in 0..10 {
-			points.push(Point::random());
+		for i in 0..10 {
+			// Random value, deterministic well-separated knot.
+			let mut point = Point::random();
+			point.timestamp = base + chrono::Duration::seconds(i * 10);
+			points.push(point);
 		}
 		points.sort_by_key(|p| p.timestamp);
 		points
@@ -21,10 +42,20 @@ pub mod tests {
 	// Z-score threshold for outlier detection. Set higher to accommodate
 	// extrapolated edge values which can naturally deviate from the mean.
 	pub const Z_THRESHOLD: f64 = 10.0;
-	// Cosine similarity threshold optimized based on actual implementation precision
-	// Linear: ~1e-4, Quadratic: ~1e-4, Cubic: ~1e-4, Polynomial: ~1e-4
-	// Using 8e-5 as the optimized threshold to account for natural numerical variation
-	pub const COS_THRESHOLD: f64 = 8e-5;
+	// Cosine similarity threshold for every CPU / SIMD / GPU / auto-dispatch comparison.
+	//
+	// This was 8e-5, which made the gate inert — it accepted anything short of a ~10,000x
+	// error. That number was never a tolerance; it was an artifact of `pow` computing
+	// `v^(2^n)` (so `pow(v, 2)` returned `v⁴`), which inflated both norms and dragged the
+	// reported "cosine similarity" of two near-identical vectors down to ~1e-4. The
+	// threshold had been tuned to the broken metric instead of the metric being fixed.
+	//
+	// With `pow` corrected and the fixture's degenerate knots removed (see POINTS), all
+	// four paths agree to ~13 decimal places — measured CPU-vs-SIMD, CPU-vs-GPU and
+	// CPU-vs-auto all in [0.9999999999999, 1.0000000000001]. 0.999 is therefore a real
+	// gate with enormous headroom over observed agreement, rather than a number chosen to
+	// let the suite pass.
+	pub const COS_THRESHOLD: f64 = 0.999;
 	pub const RESOLUTION: Resolution = Resolution::Seconds;
 
 	pub fn mean(values: &[BigDecimal]) -> BigDecimal {
@@ -32,17 +63,19 @@ pub mod tests {
 		sum / BigDecimal::from_usize(values.len()).unwrap()
 	}
 
+	/// `value` raised to `exponent`.
+	///
+	/// NB the obvious-looking loop `value = value * value` computes `value^(2^exponent)`,
+	/// not `value^exponent` — it squares the *accumulator* each pass. That bug made
+	/// `pow(v, 2)` return `v⁴`, which inflated every norm in [`cosine_similarity`] and
+	/// every variance in [`std_dev`]; the multiplication must be by the untouched base.
 	pub fn pow(value: BigDecimal, exponent: u64) -> BigDecimal {
-		if exponent == 0 {
-			return BigDecimal::from(1);
-		}
-
-		let mut value = value;
+		let mut acc = BigDecimal::from(1);
 		for _ in 0..exponent {
-			value = value.clone() * value;
+			acc = acc * value.clone();
 		}
 
-		value
+		acc
 	}
 
 	pub fn std_dev(values: &[BigDecimal], mean: &BigDecimal) -> BigDecimal {
