@@ -75,13 +75,39 @@ pub fn prewarm_gpu() -> Result<()> {
 /// Initializes the GPU interpolator with the specified configuration preset.
 /// Call this before any interpolation operations to control GPU resource usage.
 ///
+/// The GPU interpolator is a process-wide singleton whose buffer pool and staging buffers are
+/// sized **once**, when it first initializes. So this must be called **before any other GPU
+/// use** — including [`prewarm_gpu`] and any interpolation that selects the GPU backend. If the
+/// GPU is already up, the configuration cannot be applied and this returns an error rather than
+/// silently ignoring it.
+///
+/// [`gpu_config_applied`] reports whether a configuration is in force, and
+/// [`effective_gpu_config`] returns the configuration the interpolator was (or will be) built
+/// with.
+///
 /// # Arguments
 /// * `config` - GPU configuration (use presets like `GpuConfig::low_memory()`,
 ///   `GpuConfig::high_performance()`, or `GpuConfig::default()`)
 ///
 /// # Errors
 ///
-/// Returns an error if GPU is unavailable or initialization fails.
+/// - The GPU was **already initialized**, so the pool and staging buffers are already sized.
+/// - Another caller already requested a configuration.
+/// - The GPU is unavailable or initialization fails.
+///
+/// # Interaction with the `gpu-eager-init` feature
+///
+/// The `gpu-eager-init` feature initializes the GPU from a `ctor` **before `main` runs**, so
+/// with it enabled there is no point at which a configuration can be supplied first and this
+/// function will always report that the GPU is already initialized. The feature is **off by
+/// default**; leave it off if you want to configure the GPU.
+///
+/// # Note on `max_command_batch_size`
+///
+/// [`GpuConfig::buffer_pool`] and [`GpuConfig::num_staging_buffers`] are applied to the
+/// interpolator. [`GpuConfig::max_command_batch_size`] is **reserved** — command batching is
+/// not implemented yet (roadmap Phase 5.1), so that field currently has no effect. It is
+/// recorded and readable via [`effective_gpu_config`], not acted on.
 ///
 /// # Example
 /// ```ignore
@@ -89,18 +115,30 @@ pub fn prewarm_gpu() -> Result<()> {
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     // Pre-warm with high-performance configuration
+///     // Must come before any other GPU use.
 ///     splimes::prewarm_gpu_with_config(GpuConfig::high_performance())?;
-///
-///     // ... interpolation operations ...
+///     assert!(splimes::gpu_config_applied());
 ///     Ok(())
 /// }
 /// ```
-pub fn prewarm_gpu_with_config(_config: GpuConfig) -> Result<()> {
-	// Store the config in a thread-local or global state if needed
-	// For now, just force initialization
-	// TODO: Apply configuration to the global interpolator
+pub fn prewarm_gpu_with_config(config: GpuConfig) -> Result<()> {
+	gpu::types::request_gpu_config(config)?;
 	gpu::force_init_gpu()
+}
+
+/// Whether a [`GpuConfig`] supplied through [`prewarm_gpu_with_config`] is in force.
+///
+/// `false` means the interpolator is using (or will use) [`GpuConfig::default`].
+#[must_use]
+pub fn gpu_config_applied() -> bool {
+	gpu::types::gpu_config_requested()
+}
+
+/// The [`GpuConfig`] the global interpolator was built with, or will be built with if it has
+/// not initialized yet.
+#[must_use]
+pub fn effective_gpu_config() -> GpuConfig {
+	gpu::types::effective_gpu_config()
 }
 
 /// Get buffer pool statistics

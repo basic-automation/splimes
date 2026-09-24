@@ -1,3 +1,4 @@
+pub mod gpu_config;
 pub mod cubic;
 pub mod linear;
 pub mod plot;

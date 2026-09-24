@@ -1,5 +1,5 @@
 use std::{
-	borrow::Cow, collections::{HashMap, VecDeque}, sync::{LazyLock, Mutex, Arc}
+	borrow::Cow, collections::{HashMap, VecDeque}, sync::{Arc, LazyLock, Mutex, OnceLock}
 };
 
 use anyhow::{bail, Context, Result};
@@ -8,7 +8,7 @@ use wgpu::{
 	util::{BufferInitDescriptor, DeviceExt}, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryHints, PowerPreference, Queue, RequestAdapterOptions, ShaderStages
 };
 
-use crate::gpu::{Method, buffer_pool::{BufferPool, BufferPoolConfig, PooledBufferType}, StagingBufferManager, async_handle::GpuInterpolationResult};
+use crate::gpu::{Method, buffer_pool::{BufferPool, PooledBufferType}, config::GpuConfig, StagingBufferManager, async_handle::GpuInterpolationResult};
 
 static GLOBAL_INTERPOLATOR: LazyLock<Result<GpuInterpolator>> = LazyLock::new(|| {
 	// Use spawn_blocking to handle async initialization without runtime conflicts
@@ -19,6 +19,55 @@ static GLOBAL_INTERPOLATOR: LazyLock<Result<GpuInterpolator>> = LazyLock::new(||
 	.join()
 	.unwrap()
 });
+
+/// The [`GpuConfig`] a caller asked the global interpolator to be built with.
+///
+/// The interpolator is a process-wide [`LazyLock`] whose buffer pool and staging buffers are
+/// sized **once**, when it first initializes. So a configuration can only take effect if it is
+/// recorded *before* that happens — which is exactly what
+/// [`prewarm_gpu_with_config`](crate::prewarm_gpu_with_config) does, and why it reports an
+/// error rather than silently doing nothing when the GPU is already up.
+///
+/// Unset means [`GpuConfig::default`].
+static REQUESTED_CONFIG: OnceLock<GpuConfig> = OnceLock::new();
+
+/// Record the [`GpuConfig`] the global interpolator should initialize with.
+///
+/// Returns `Err` if the interpolator has **already** been initialized, because its buffer pool
+/// and staging buffers are sized at construction and cannot be resized afterwards — reporting
+/// that is the difference between a configuration API and a no-op.
+///
+/// # Errors
+///
+/// The GPU was already initialized, so the configuration could not be applied.
+pub(crate) fn request_gpu_config(config: GpuConfig) -> Result<()> {
+	if gpu_is_initialized() {
+		bail!("GPU is already initialized; its buffer pool and staging buffers are sized at construction, so a configuration must be supplied before the first GPU use");
+	}
+	// A losing race means another thread configured first; its configuration is the one the
+	// interpolator will be built with, so report rather than pretend.
+	REQUESTED_CONFIG.set(config).map_err(|_| anyhow::anyhow!("a GPU configuration was already requested by another caller"))?;
+	Ok(())
+}
+
+/// Whether the process-wide GPU interpolator has been initialized yet.
+///
+/// Checks the `LazyLock` **without** forcing it, so asking the question never triggers the very
+/// initialization the caller is trying to get ahead of.
+pub(crate) fn gpu_is_initialized() -> bool {
+	LazyLock::get(&GLOBAL_INTERPOLATOR).is_some()
+}
+
+/// Whether a caller supplied a configuration (as opposed to the interpolator using the
+/// defaults).
+pub(crate) fn gpu_config_requested() -> bool {
+	REQUESTED_CONFIG.get().is_some()
+}
+
+/// The configuration the global interpolator is (or will be) built with.
+pub(crate) fn effective_gpu_config() -> GpuConfig {
+	REQUESTED_CONFIG.get().cloned().unwrap_or_default()
+}
 
 #[derive(Debug)]
 pub struct GpuInterpolator {
@@ -73,8 +122,11 @@ impl GpuInterpolator {
 		let (device, queue) = adapter.request_device(&DeviceDescriptor { label: Some("Interpolation Device"), required_features: if supports_f64 { Features::SHADER_F64 } else { Features::empty() }, required_limits: Limits::default(), memory_hints: MemoryHints::default(), ..Default::default() }).await.context("Failed to request GPU device")?;
 		let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor { label: Some("Interpolation Bind Group Layout"), entries: &[BindGroupLayoutEntry { binding: 0, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }, BindGroupLayoutEntry { binding: 1, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }, BindGroupLayoutEntry { binding: 2, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }, BindGroupLayoutEntry { binding: 3, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None }, BindGroupLayoutEntry { binding: 4, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }] });
 
-		let buffer_pool = BufferPool::new(Arc::new(device.clone()), BufferPoolConfig::default());
-	let staging_manager = StagingBufferManager::new(max_storage_buffer_binding_size as u64, 3);
+		// Apply the caller's configuration if one was recorded before this first use (see
+		// `REQUESTED_CONFIG`); otherwise the documented defaults.
+		let config = effective_gpu_config();
+		let buffer_pool = BufferPool::new(Arc::new(device.clone()), config.buffer_pool.clone());
+		let staging_manager = StagingBufferManager::new(max_storage_buffer_binding_size as u64, config.num_staging_buffers);
 
 	Ok(Self { device, queue, bind_group_layout, pipelines_f64: Mutex::new(HashMap::new()), pipelines_f32: Mutex::new(HashMap::new()), supports_f64, max_storage_buffer_binding_size, buffer_pool, staging_manager })
 	}
