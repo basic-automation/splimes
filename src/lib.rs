@@ -11,6 +11,7 @@ mod gpu;
 pub mod helpers; // Make helpers public to allow access to helpers::should_use_gpu
 mod optimizations;
 mod splines;
+#[cfg(test)]
 mod tests;
 mod types;
 
