@@ -8,7 +8,7 @@ use tokio::runtime::Runtime;
 
 // Helper function to generate test data
 fn generate_test_data(input_size: usize, start: DateTime<Utc>, _resolution: Resolution) -> (Vec<Point>, DateTime<Utc>, DateTime<Utc>) {
-	use rand::Rng;
+	use rand::RngExt;
 	let mut rng = ChaCha8Rng::seed_from_u64(42);
 	let mut points = Vec::with_capacity(input_size);
 	let mut current_time = start;
