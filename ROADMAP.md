@@ -22,7 +22,7 @@ over `BigDecimal` values.
 - [x] Every WGSL shader is parsed and validated with naga in unit tests, so no GPU is needed
 - [x] README example compiled and run as a doctest; the previously `ignore`d API examples are compile-checked (one was broken)
 - [x] CI: rustfmt, clippy (defect categories), MSRV, tests on Linux (lavapipe, GPU required) / macOS / Windows (WARP, the f32 path), rustdoc, `cargo package`, cargo-deny
-- [ ] Publish 0.1.0 to crates.io
+- [x] Published 0.1.0 to crates.io (2026-10-05)
 - [ ] Switch WeftDB from the in-tree copy to `splimes = "0.1"`
 
 ---
