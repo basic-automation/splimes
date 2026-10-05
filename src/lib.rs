@@ -1,3 +1,6 @@
+// Proving `Send` through wgpu's nested buffer/device types exceeds the default limit of 128;
+// rustc warns that overflowing it will become a hard error.
+#![recursion_limit = "256"]
 #![warn(clippy::pedantic, clippy::nursery, clippy::all)]
 #![allow(clippy::multiple_crate_versions, clippy::used_underscore_binding, clippy::similar_names, clippy::module_name_repetitions, clippy::module_inception, clippy::cast_precision_loss)]
 
