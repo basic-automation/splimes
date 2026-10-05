@@ -4,7 +4,7 @@ pub mod regression_tests {
 	use chrono::Utc;
 	use serial_test::serial;
 
-	use crate::{gpu::types::GpuInterpolator, gpu_interpolate, parallel_interpolate, splines::*, Point, Resolution};
+	use crate::{Point, Resolution, gpu::types::GpuInterpolator, gpu_interpolate, parallel_interpolate, splines::*};
 
 	/// The epoch every fixture point is measured from, fixed once per process.
 	///

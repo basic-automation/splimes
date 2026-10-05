@@ -1,9 +1,10 @@
 #![warn(clippy::pedantic, clippy::nursery, clippy::all)]
 #![allow(clippy::multiple_crate_versions, clippy::used_underscore_binding, clippy::similar_names, clippy::module_name_repetitions, clippy::module_inception, clippy::cast_precision_loss)]
 
+use std::sync::LazyLock;
+
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
-use std::sync::LazyLock;
 pub use optimizations::{apply_fast_path, cpu_interpolate, parallel_interpolate};
 pub use types::{BASE_BATCH_SIZE, Error, POINT_SIZE, Point, Resolution, Spline};
 
@@ -41,8 +42,7 @@ fn ensure_gpu_init() {
 }
 
 // Re-export for public API
-pub use gpu::gpu_interpolate;
-pub use gpu::{GpuConfig, BufferPoolStats};
+pub use gpu::{BufferPoolStats, GpuConfig, gpu_interpolate};
 pub use helpers::{InterpolationStrategy, estimate_output_points, generate_target_times, should_use_gpu};
 pub use splines::{DAYS_IN_MONTH, DAYS_IN_YEAR, SECONDS_IN_DAY, SECONDS_IN_HOUR, SECONDS_IN_MINUTE, SECONDS_IN_MONTH, SECONDS_IN_WEEK, SECONDS_IN_YEAR};
 

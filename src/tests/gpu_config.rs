@@ -8,7 +8,7 @@
 //! the configuration is recorded *before* the interpolator initializes, so what a configuration
 //! is worth can be checked on any machine, including CI without an adapter.
 
-use crate::{effective_gpu_config, gpu_config_applied, GpuConfig};
+use crate::{GpuConfig, effective_gpu_config, gpu_config_applied};
 
 /// The presets are distinguishable, which is what makes applying one meaningful.
 ///
@@ -70,10 +70,7 @@ fn requesting_a_config_is_recorded_or_honestly_refused() {
 			// first, or this machine has no usable adapter. All are reported, never silent.
 			let msg = e.to_string();
 			eprintln!("GPU CONFIG PATH: refused -> {msg}");
-			assert!(
-				msg.contains("already initialized") || msg.contains("already requested") || msg.contains("adapter") || msg.contains("GPU"),
-				"a refusal must say why; got: {msg}"
-			);
+			assert!(msg.contains("already initialized") || msg.contains("already requested") || msg.contains("adapter") || msg.contains("GPU"), "a refusal must say why; got: {msg}");
 		}
 	}
 }

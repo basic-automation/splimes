@@ -68,13 +68,9 @@ pub fn linear_simd(points: &[Point], target_times: &[DateTime<Utc>], _resolution
 	// Use nanoseconds for internal time calculations to avoid integer division issues
 	// (e.g., minute data with Years resolution = 0). Nanoseconds provide sufficient
 	// precision for interpolation while staying within f64 range.
-	let input_times: Vec<f64> = points.iter()
-		.map(|p| (p.timestamp - base_time).num_nanoseconds().unwrap_or(0) as f64)
-		.collect();
+	let input_times: Vec<f64> = points.iter().map(|p| (p.timestamp - base_time).num_nanoseconds().unwrap_or(0) as f64).collect();
 	let input_values: Vec<f64> = points.iter().map(|p| round_to_places(p.value.to_f64().unwrap_or(0.0), 10)).collect();
-	let targets: Vec<f64> = target_times.iter()
-		.map(|t| (*t - base_time).num_nanoseconds().unwrap_or(0) as f64)
-		.collect();
+	let targets: Vec<f64> = target_times.iter().map(|t| (*t - base_time).num_nanoseconds().unwrap_or(0) as f64).collect();
 
 	let mut results = Vec::with_capacity(target_times.len());
 

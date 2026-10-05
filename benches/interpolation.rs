@@ -1,9 +1,9 @@
 use bigdecimal::FromPrimitive;
 use chrono::{DateTime, Duration, Utc};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use splimes::{auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate, prewarm_gpu, Point, Resolution, Spline};
+use splimes::{Point, Resolution, Spline, auto_interpolate, cpu_interpolate, estimate_output_points, gpu_interpolate, parallel_interpolate, prewarm_gpu};
 use tokio::runtime::Runtime;
 
 // Helper function to generate test data

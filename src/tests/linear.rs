@@ -7,7 +7,7 @@ pub mod tests {
 	use chrono::{DateTime, Utc};
 	use serial_test::serial;
 
-	use crate::{auto_interpolate, gpu::types::GpuInterpolator, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::linear, tests::plot_terminal, Point, Resolution};
+	use crate::{Point, Resolution, auto_interpolate, gpu::types::GpuInterpolator, gpu_interpolate, helpers::TargetTimesIterator, parallel_interpolate, splines::linear, tests::plot_terminal};
 
 	/// The shared interpolation fixture: ten points with **random values on strictly
 	/// separated knots**.

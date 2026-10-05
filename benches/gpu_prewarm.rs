@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use bigdecimal::BigDecimal;
 use chrono::{Duration, Utc};
-use criterion::{criterion_group, criterion_main, Criterion};
-use splimes::{gpu_interpolate, prewarm_gpu, Point, Resolution, Spline};
+use criterion::{Criterion, criterion_group, criterion_main};
+use splimes::{Point, Resolution, Spline, gpu_interpolate, prewarm_gpu};
 use tokio::runtime::Runtime;
 
 fn create_test_data(count: usize) -> Vec<Point> {

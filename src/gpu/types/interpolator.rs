@@ -2,13 +2,15 @@ use std::{
 	borrow::Cow, collections::{HashMap, VecDeque}, sync::{Arc, LazyLock, Mutex, OnceLock}
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytemuck::cast_slice;
 use wgpu::{
-	util::{BufferInitDescriptor, DeviceExt}, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryHints, PowerPreference, Queue, RequestAdapterOptions, ShaderStages
+	Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryHints, PowerPreference, Queue, RequestAdapterOptions, ShaderStages, util::{BufferInitDescriptor, DeviceExt}
 };
 
-use crate::gpu::{Method, buffer_pool::{BufferPool, PooledBufferType}, config::GpuConfig, StagingBufferManager, async_handle::GpuInterpolationResult};
+use crate::gpu::{
+	Method, StagingBufferManager, async_handle::GpuInterpolationResult, buffer_pool::{BufferPool, PooledBufferType}, config::GpuConfig
+};
 
 static GLOBAL_INTERPOLATOR: LazyLock<Result<GpuInterpolator>> = LazyLock::new(|| {
 	// Use spawn_blocking to handle async initialization without runtime conflicts
@@ -128,7 +130,7 @@ impl GpuInterpolator {
 		let buffer_pool = BufferPool::new(Arc::new(device.clone()), config.buffer_pool.clone());
 		let staging_manager = StagingBufferManager::new(max_storage_buffer_binding_size as u64, config.num_staging_buffers);
 
-	Ok(Self { device, queue, bind_group_layout, pipelines_f64: Mutex::new(HashMap::new()), pipelines_f32: Mutex::new(HashMap::new()), supports_f64, max_storage_buffer_binding_size, buffer_pool, staging_manager })
+		Ok(Self { device, queue, bind_group_layout, pipelines_f64: Mutex::new(HashMap::new()), pipelines_f32: Mutex::new(HashMap::new()), supports_f64, max_storage_buffer_binding_size, buffer_pool, staging_manager })
 	}
 
 	pub fn supports_f64_static() -> Result<bool> {
@@ -330,16 +332,8 @@ impl GpuInterpolator {
 
 		// Create input buffers with exact size (not pooled - input data is test-specific)
 		let _input_size = std::mem::size_of_val(input_times) as u64;
-		let input_times_buffer = Arc::new(interpolator.device.create_buffer_init(&BufferInitDescriptor {
-			label: Some("Input Times Buffer"),
-			contents: cast_slice(input_times),
-			usage: BufferUsages::STORAGE,
-		}));
-		let input_values_buffer = Arc::new(interpolator.device.create_buffer_init(&BufferInitDescriptor {
-			label: Some("Input Values Buffer"),
-			contents: cast_slice(input_values),
-			usage: BufferUsages::STORAGE,
-		}));
+		let input_times_buffer = Arc::new(interpolator.device.create_buffer_init(&BufferInitDescriptor { label: Some("Input Times Buffer"), contents: cast_slice(input_times), usage: BufferUsages::STORAGE }));
+		let input_values_buffer = Arc::new(interpolator.device.create_buffer_init(&BufferInitDescriptor { label: Some("Input Values Buffer"), contents: cast_slice(input_values), usage: BufferUsages::STORAGE }));
 
 		// Ensure pipeline exists, create if needed
 		{
@@ -371,12 +365,9 @@ impl GpuInterpolator {
 			let target_size = std::mem::size_of_val(target_batch) as u64;
 
 			// Acquire pooled buffers with metadata for safe zeroing
-			let target_acquired = interpolator.buffer_pool.acquire_with_metadata(
-				target_size, PooledBufferType::Storage, Some("Target Times Buffer"))?;
-			let output_acquired = interpolator.buffer_pool.acquire_with_metadata(
-				output_size as u64, PooledBufferType::Storage, Some("Output Buffer"))?;
-			let staging_acquired = interpolator.buffer_pool.acquire_with_metadata(
-				output_size as u64, PooledBufferType::Staging, Some("Staging Buffer"))?;
+			let target_acquired = interpolator.buffer_pool.acquire_with_metadata(target_size, PooledBufferType::Storage, Some("Target Times Buffer"))?;
+			let output_acquired = interpolator.buffer_pool.acquire_with_metadata(output_size as u64, PooledBufferType::Storage, Some("Output Buffer"))?;
+			let staging_acquired = interpolator.buffer_pool.acquire_with_metadata(output_size as u64, PooledBufferType::Staging, Some("Staging Buffer"))?;
 
 			// Write actual data to target buffer
 			interpolator.queue.write_buffer(&target_acquired.buffer, 0, cast_slice(target_batch));
@@ -399,13 +390,7 @@ impl GpuInterpolator {
 
 			// Use BufferBinding with explicit size for pooled buffers - shader uses arrayLength()
 			// to determine element count, so we must expose only the actual data size
-			let bind_group = interpolator.device.create_bind_group(&BindGroupDescriptor { label: Some("Interpolation Bind Group"), layout: &interpolator.bind_group_layout, entries: &[
-				BindGroupEntry { binding: 0, resource: input_times_buffer.as_entire_binding() },
-				BindGroupEntry { binding: 1, resource: input_values_buffer.as_entire_binding() },
-				BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &target_times_buffer, offset: 0, size: std::num::NonZeroU64::new(target_size) }) },
-				BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &output_buffer, offset: 0, size: std::num::NonZeroU64::new(output_size as u64) }) },
-				BindGroupEntry { binding: 4, resource: config_buffer.as_entire_binding() }
-			] });
+			let bind_group = interpolator.device.create_bind_group(&BindGroupDescriptor { label: Some("Interpolation Bind Group"), layout: &interpolator.bind_group_layout, entries: &[BindGroupEntry { binding: 0, resource: input_times_buffer.as_entire_binding() }, BindGroupEntry { binding: 1, resource: input_values_buffer.as_entire_binding() }, BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &target_times_buffer, offset: 0, size: std::num::NonZeroU64::new(target_size) }) }, BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &output_buffer, offset: 0, size: std::num::NonZeroU64::new(output_size as u64) }) }, BindGroupEntry { binding: 4, resource: config_buffer.as_entire_binding() }] });
 			let mut encoder = interpolator.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Interpolation Encoder") });
 
 			// Lock pipelines for the duration of the compute pass
@@ -424,14 +409,7 @@ impl GpuInterpolator {
 			interpolator.queue.submit(std::iter::once(encoder.finish()));
 
 			// Track this batch as pending
-			pending_batches.push_back(PendingBatch {
-				staging_buffer,
-				output_size,
-				batch_len: target_batch.len(),
-				target_buffer: target_times_buffer,
-				output_buffer,
-				_marker: std::marker::PhantomData,
-			});
+			pending_batches.push_back(PendingBatch { staging_buffer, output_size, batch_len: target_batch.len(), target_buffer: target_times_buffer, output_buffer, _marker: std::marker::PhantomData });
 
 			// If pipeline window is full, read oldest completed batch
 			if pending_batches.len() >= window_size {
@@ -448,11 +426,7 @@ impl GpuInterpolator {
 	}
 
 	/// Reads the oldest pending batch and appends results
-	fn read_oldest_batch_f64(
-		interpolator: &Self,
-		pending_batches: &mut VecDeque<PendingBatch<f64>>,
-		all_results: &mut Vec<f64>,
-	) -> Result<()> {
+	fn read_oldest_batch_f64(interpolator: &Self, pending_batches: &mut VecDeque<PendingBatch<f64>>, all_results: &mut Vec<f64>) -> Result<()> {
 		let batch = pending_batches.pop_front().unwrap();
 
 		// Poll to ensure this batch is complete
@@ -515,16 +489,8 @@ impl GpuInterpolator {
 
 		// Create input buffers with exact size (not pooled - input data is test-specific)
 		let _input_size = std::mem::size_of_val(input_times) as u64;
-		let input_times_buffer = Arc::new(interpolator.device.create_buffer_init(&BufferInitDescriptor {
-			label: Some("Input Times Buffer"),
-			contents: cast_slice(input_times),
-			usage: BufferUsages::STORAGE,
-		}));
-		let input_values_buffer = Arc::new(interpolator.device.create_buffer_init(&BufferInitDescriptor {
-			label: Some("Input Values Buffer"),
-			contents: cast_slice(input_values),
-			usage: BufferUsages::STORAGE,
-		}));
+		let input_times_buffer = Arc::new(interpolator.device.create_buffer_init(&BufferInitDescriptor { label: Some("Input Times Buffer"), contents: cast_slice(input_times), usage: BufferUsages::STORAGE }));
+		let input_values_buffer = Arc::new(interpolator.device.create_buffer_init(&BufferInitDescriptor { label: Some("Input Values Buffer"), contents: cast_slice(input_values), usage: BufferUsages::STORAGE }));
 
 		// Ensure pipeline exists, create if needed
 		{
@@ -556,12 +522,9 @@ impl GpuInterpolator {
 			let target_size = std::mem::size_of_val(target_batch) as u64;
 
 			// Acquire pooled buffers with metadata for safe zeroing
-			let target_acquired = interpolator.buffer_pool.acquire_with_metadata(
-				target_size, PooledBufferType::Storage, Some("Target Times Buffer"))?;
-			let output_acquired = interpolator.buffer_pool.acquire_with_metadata(
-				output_size as u64, PooledBufferType::Storage, Some("Output Buffer"))?;
-			let staging_acquired = interpolator.buffer_pool.acquire_with_metadata(
-				output_size as u64, PooledBufferType::Staging, Some("Staging Buffer"))?;
+			let target_acquired = interpolator.buffer_pool.acquire_with_metadata(target_size, PooledBufferType::Storage, Some("Target Times Buffer"))?;
+			let output_acquired = interpolator.buffer_pool.acquire_with_metadata(output_size as u64, PooledBufferType::Storage, Some("Output Buffer"))?;
+			let staging_acquired = interpolator.buffer_pool.acquire_with_metadata(output_size as u64, PooledBufferType::Staging, Some("Staging Buffer"))?;
 
 			// Write actual data to target buffer
 			interpolator.queue.write_buffer(&target_acquired.buffer, 0, cast_slice(target_batch));
@@ -584,13 +547,7 @@ impl GpuInterpolator {
 
 			// Use BufferBinding with explicit size for pooled buffers - shader uses arrayLength()
 			// to determine element count, so we must expose only the actual data size
-			let bind_group = interpolator.device.create_bind_group(&BindGroupDescriptor { label: Some("Interpolation Bind Group"), layout: &interpolator.bind_group_layout, entries: &[
-				BindGroupEntry { binding: 0, resource: input_times_buffer.as_entire_binding() },
-				BindGroupEntry { binding: 1, resource: input_values_buffer.as_entire_binding() },
-				BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &target_times_buffer, offset: 0, size: std::num::NonZeroU64::new(target_size) }) },
-				BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &output_buffer, offset: 0, size: std::num::NonZeroU64::new(output_size as u64) }) },
-				BindGroupEntry { binding: 4, resource: config_buffer.as_entire_binding() }
-			] });
+			let bind_group = interpolator.device.create_bind_group(&BindGroupDescriptor { label: Some("Interpolation Bind Group"), layout: &interpolator.bind_group_layout, entries: &[BindGroupEntry { binding: 0, resource: input_times_buffer.as_entire_binding() }, BindGroupEntry { binding: 1, resource: input_values_buffer.as_entire_binding() }, BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &target_times_buffer, offset: 0, size: std::num::NonZeroU64::new(target_size) }) }, BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &output_buffer, offset: 0, size: std::num::NonZeroU64::new(output_size as u64) }) }, BindGroupEntry { binding: 4, resource: config_buffer.as_entire_binding() }] });
 			let mut encoder = interpolator.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Interpolation Encoder") });
 
 			// Lock pipelines for the duration of the compute pass
@@ -609,14 +566,7 @@ impl GpuInterpolator {
 			interpolator.queue.submit(std::iter::once(encoder.finish()));
 
 			// Track this batch as pending
-			pending_batches.push_back(PendingBatch {
-				staging_buffer,
-				output_size,
-				batch_len: target_batch.len(),
-				target_buffer: target_times_buffer,
-				output_buffer,
-				_marker: std::marker::PhantomData,
-			});
+			pending_batches.push_back(PendingBatch { staging_buffer, output_size, batch_len: target_batch.len(), target_buffer: target_times_buffer, output_buffer, _marker: std::marker::PhantomData });
 
 			// If pipeline window is full, read oldest completed batch
 			if pending_batches.len() >= window_size {
@@ -633,11 +583,7 @@ impl GpuInterpolator {
 	}
 
 	/// Reads the oldest pending batch and appends results (f32 version)
-	fn read_oldest_batch_f32(
-		interpolator: &Self,
-		pending_batches: &mut VecDeque<PendingBatch<f32>>,
-		all_results: &mut Vec<f32>,
-	) -> Result<()> {
+	fn read_oldest_batch_f32(interpolator: &Self, pending_batches: &mut VecDeque<PendingBatch<f32>>, all_results: &mut Vec<f32>) -> Result<()> {
 		let batch = pending_batches.pop_front().unwrap();
 
 		// Poll to ensure this batch is complete
@@ -678,13 +624,7 @@ impl GpuInterpolator {
 	/// The result is currently computed synchronously but wrapped in an async interface
 	/// for future enhancement with true asynchronous GPU operations.
 	#[allow(dead_code)] // Infrastructure for future async GPU operations
-	pub fn interpolate_f64_async_static(
-		input_times: &[f64],
-		input_values: &[f64],
-		target_times: &[f64],
-		method: &Method,
-		config_buffer: &wgpu::Buffer,
-	) -> Result<GpuInterpolationResult<f64>> {
+	pub fn interpolate_f64_async_static(input_times: &[f64], input_values: &[f64], target_times: &[f64], method: &Method, config_buffer: &wgpu::Buffer) -> Result<GpuInterpolationResult<f64>> {
 		let results = Self::interpolate_f64_static(input_times, input_values, target_times, method, config_buffer)?;
 		Ok(GpuInterpolationResult::new(results))
 	}
@@ -695,13 +635,7 @@ impl GpuInterpolator {
 	/// The result is currently computed synchronously but wrapped in an async interface
 	/// for future enhancement with true asynchronous GPU operations.
 	#[allow(dead_code)] // Infrastructure for future async GPU operations
-	pub fn interpolate_f32_async_static(
-		input_times: &[f32],
-		input_values: &[f32],
-		target_times: &[f32],
-		method: &Method,
-		config_buffer: &wgpu::Buffer,
-	) -> Result<GpuInterpolationResult<f32>> {
+	pub fn interpolate_f32_async_static(input_times: &[f32], input_values: &[f32], target_times: &[f32], method: &Method, config_buffer: &wgpu::Buffer) -> Result<GpuInterpolationResult<f32>> {
 		let results = Self::interpolate_f32_static(input_times, input_values, target_times, method, config_buffer)?;
 		Ok(GpuInterpolationResult::new(results))
 	}
