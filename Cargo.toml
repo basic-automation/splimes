@@ -33,6 +33,9 @@ fake = { workspace = true, features = ["derive", "bigdecimal", "chrono"] }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# Parses and validates the WGSL shaders in unit tests, with no GPU needed. Same major as
+# the naga wgpu uses, so it adds no extra build.
+naga = { version = "30", features = ["wgsl-in"] }
 criterion = { workspace = true, features = ["async_futures"] }
 rand = { workspace = true }
 rand_chacha = { workspace = true }

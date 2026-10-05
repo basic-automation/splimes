@@ -103,6 +103,7 @@ fn quadratic_interpolate_general(target_time: f32) -> f32 {
         let l2 = ((norm_target_time - t0) * (norm_target_time - t1)) / denom2;
 
         return v0 * l0 + v1 * l1 + v2 * l2;
+    }
 }
 
 @compute @workgroup_size(256)
