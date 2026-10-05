@@ -103,8 +103,8 @@ struct PendingBatch<T> {
 
 impl GpuInterpolator {
 	async fn new() -> Result<Self> {
-		let instance = Instance::new(&InstanceDescriptor { backends: Backends::PRIMARY, flags: InstanceFlags::default(), ..Default::default() });
-		let adapter = instance.request_adapter(&RequestAdapterOptions { power_preference: PowerPreference::HighPerformance, compatible_surface: None, force_fallback_adapter: false }).await.context("Failed to request GPU adapter")?;
+		let instance = Instance::new(InstanceDescriptor { backends: Backends::PRIMARY, flags: InstanceFlags::default(), ..InstanceDescriptor::new_without_display_handle() });
+		let adapter = instance.request_adapter(&RequestAdapterOptions { power_preference: PowerPreference::HighPerformance, compatible_surface: None, force_fallback_adapter: false, apply_limit_buckets: false }).await.context("Failed to request GPU adapter")?;
 		//let adapter_info = adapter.get_info();
 		// println!("GPU: Adapter name: {}, Backend: {:?}", adapter_info.name, adapter_info.backend);
 		let supports_f64 = adapter.features().contains(Features::SHADER_F64);
@@ -113,7 +113,7 @@ impl GpuInterpolator {
 		// This is crucial for batching large datasets and memory management
 		// We'll limit to 128MB to avoid system memory pressure
 		let adapter_limits = adapter.limits();
-		let max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size as usize;
+		let max_storage_buffer_binding_size = usize::try_from(adapter_limits.max_storage_buffer_binding_size).unwrap_or(usize::MAX);
 		// Clamp to a reasonable maximum to avoid excessive memory usage
 		let max_storage_buffer_binding_size = max_storage_buffer_binding_size.min(128 * 1024 * 1024);
 
@@ -223,7 +223,7 @@ impl GpuInterpolator {
 				if !pipelines.contains_key(method) {
 					let shader_source = method.shader_source_f64();
 					let shader = interpolator.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("Interpolation Shader"), source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_source)) });
-					let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[&interpolator.bind_group_layout], push_constant_ranges: &[] });
+					let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[Some(&interpolator.bind_group_layout)], immediate_size: 0 });
 					let pipeline = interpolator.device.create_compute_pipeline(&ComputePipelineDescriptor { label: Some("Interpolation Pipeline"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None });
 					pipelines.insert(*method, pipeline);
 				}
@@ -234,7 +234,7 @@ impl GpuInterpolator {
 				if !pipelines.contains_key(method) {
 					let shader_source = method.shader_source_f32();
 					let shader = interpolator.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("Interpolation Shader"), source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_source)) });
-					let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[&interpolator.bind_group_layout], push_constant_ranges: &[] });
+					let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[Some(&interpolator.bind_group_layout)], immediate_size: 0 });
 					let pipeline = interpolator.device.create_compute_pipeline(&ComputePipelineDescriptor { label: Some("Interpolation Pipeline"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None });
 					pipelines.insert(*method, pipeline);
 				}
@@ -347,7 +347,7 @@ impl GpuInterpolator {
 			if !pipelines.contains_key(method) {
 				let shader_source = method.shader_source_f64();
 				let shader = interpolator.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("Interpolation Shader"), source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_source)) });
-				let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[&interpolator.bind_group_layout], push_constant_ranges: &[] });
+				let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[Some(&interpolator.bind_group_layout)], immediate_size: 0 });
 				let pipeline = interpolator.device.create_compute_pipeline(&ComputePipelineDescriptor { label: Some("Interpolation Pipeline"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None });
 				pipelines.insert(*method, pipeline);
 			}
@@ -469,7 +469,7 @@ impl GpuInterpolator {
 		let _ = interpolator.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 		rx.recv().unwrap_or(Err(wgpu::BufferAsyncError)).context("Failed to map buffer")?;
 
-		let data = buffer_slice.get_mapped_range();
+		let data = buffer_slice.get_mapped_range().context("Failed to read mapped buffer range")?;
 		let element_size = std::mem::size_of::<f64>();
 		let batch_results: Vec<f64> = bytemuck::cast_slice(&data[..batch.batch_len * element_size]).to_vec();
 		drop(data);
@@ -532,7 +532,7 @@ impl GpuInterpolator {
 			if !pipelines.contains_key(method) {
 				let shader_source = method.shader_source_f32();
 				let shader = interpolator.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("Interpolation Shader"), source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_source)) });
-				let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[&interpolator.bind_group_layout], push_constant_ranges: &[] });
+				let pipeline_layout = interpolator.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Interpolation Pipeline Layout"), bind_group_layouts: &[Some(&interpolator.bind_group_layout)], immediate_size: 0 });
 				let pipeline = interpolator.device.create_compute_pipeline(&ComputePipelineDescriptor { label: Some("Interpolation Pipeline"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None });
 				pipelines.insert(*method, pipeline);
 			}
@@ -654,7 +654,7 @@ impl GpuInterpolator {
 		let _ = interpolator.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 		rx.recv().unwrap_or(Err(wgpu::BufferAsyncError)).context("Failed to map buffer")?;
 
-		let data = buffer_slice.get_mapped_range();
+		let data = buffer_slice.get_mapped_range().context("Failed to read mapped buffer range")?;
 		let element_size = std::mem::size_of::<f32>();
 		let batch_results: Vec<f32> = bytemuck::cast_slice(&data[..batch.batch_len * element_size]).to_vec();
 		drop(data);

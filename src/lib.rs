@@ -17,7 +17,7 @@ mod types;
 /// When gpu-eager-init feature is enabled, run GPU prewarm BEFORE main()
 /// This eliminates any latency on the first interpolation call
 #[cfg(feature = "gpu-eager-init")]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn _gpu_startup_init() {
 	let _ = gpu::force_init_gpu();
 }
