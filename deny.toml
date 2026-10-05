@@ -1,0 +1,47 @@
+# cargo-deny policy — run in CI as `cargo deny check`.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Every RustSec advisory (vulnerability, unmaintained, unsound, yanked) fails the check.
+# To accept one deliberately, add it below with a reason and a date to revisit.
+ignore = []
+
+[licenses]
+# Permissive licenses only. WeftDB is MIT; anything copyleft needs an explicit exception.
+allow = [
+	"MIT",
+	"Apache-2.0",
+	"Apache-2.0 WITH LLVM-exception",
+	"BSD-2-Clause",
+	"BSD-3-Clause",
+	"BSL-1.0",
+	"CC0-1.0",
+	"ISC",
+	"Unicode-3.0",
+	"Unicode-DFS-2016",
+	"Unlicense",
+	"Zlib",
+]
+confidence-threshold = 0.9
+exceptions = [
+	# MPL-2.0 is file-level copyleft: it covers modifications to option-ext's own files,
+	# not WeftDB. Used unmodified, via `dirs`.
+	{ allow = ["MPL-2.0"], crate = "option-ext" },
+	# Only reachable on targets WeftDB doesn't ship for (via crossterm's Windows/terminfo path).
+	{ allow = ["WTFPL"], crate = "terminfo" },
+]
+
+[bans]
+# Duplicate versions are common transitively (wgpu, arrow, turso); report, don't fail.
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal path dependencies are declared once in [workspace.dependencies] with a version.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

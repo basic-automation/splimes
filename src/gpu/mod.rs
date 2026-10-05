@@ -4,7 +4,6 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use sysinfo::System;
 use tempfile::NamedTempFile;
 use wgpu::util::DeviceExt;
 
@@ -169,7 +168,7 @@ pub fn gpu_interpolate_f64(points: &[Point], start: &DateTime<Utc>, end: &DateTi
 		bail!("Invalid time range");
 	}
 
-	let mut system = System::new_all();
+	let mut system = crate::helpers::memory_only_system();
 	let mut result = Vec::new();
 	let mut temp_file: Option<BufWriter<File>> = None;
 	let mut temp_path: Option<tempfile::TempPath> = None;

@@ -21,16 +21,7 @@ mod tests {
 	/// Apple, integrated, or WARP adapters.
 	#[test]
 	fn all_shaders_parse_and_validate() {
-		let shaders: [(&str, &str, Capabilities); 8] = [
-			("linear f32", super::LINEAR_INTERPOLATION_SHADER_F32, Capabilities::empty()),
-			("quadratic f32", super::QUADRATIC_INTERPOLATION_SHADER, Capabilities::empty()),
-			("cubic f32", super::CUBIC_INTERPOLATION_SHADER, Capabilities::empty()),
-			("polynomial f32", super::POLYNOMIAL_INTERPOLATION_SHADER, Capabilities::empty()),
-			("linear f64", super::LINEAR_INTERPOLATION_SHADER_F64, Capabilities::FLOAT64),
-			("quadratic f64", super::QUADRATIC_INTERPOLATION_SHADER_F64, Capabilities::FLOAT64),
-			("cubic f64", super::CUBIC_INTERPOLATION_SHADER_F64, Capabilities::FLOAT64),
-			("polynomial f64", super::POLYNOMIAL_INTERPOLATION_SHADER_F64, Capabilities::FLOAT64),
-		];
+		let shaders: [(&str, &str, Capabilities); 8] = [("linear f32", super::LINEAR_INTERPOLATION_SHADER_F32, Capabilities::empty()), ("quadratic f32", super::QUADRATIC_INTERPOLATION_SHADER, Capabilities::empty()), ("cubic f32", super::CUBIC_INTERPOLATION_SHADER, Capabilities::empty()), ("polynomial f32", super::POLYNOMIAL_INTERPOLATION_SHADER, Capabilities::empty()), ("linear f64", super::LINEAR_INTERPOLATION_SHADER_F64, Capabilities::FLOAT64), ("quadratic f64", super::QUADRATIC_INTERPOLATION_SHADER_F64, Capabilities::FLOAT64), ("cubic f64", super::CUBIC_INTERPOLATION_SHADER_F64, Capabilities::FLOAT64), ("polynomial f64", super::POLYNOMIAL_INTERPOLATION_SHADER_F64, Capabilities::FLOAT64)];
 		let mut failures = Vec::new();
 		for (name, source, caps) in shaders {
 			match naga::front::wgsl::parse_str(source) {

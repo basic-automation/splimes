@@ -66,7 +66,7 @@ where
 	sorted_points.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 	let rounded_start = resolution.round(start)?;
 	let rounded_end = resolution.round(end)?;
-	let system = System::new_all();
+	let system = crate::helpers::memory_only_system();
 	let mut result = Vec::new();
 	let total_memory = system.total_memory();
 	let t_m: f64 = f64::from_u64(total_memory).ok_or_else(|| Error::ConversionError("Failed to convert total memory".to_string()))?;

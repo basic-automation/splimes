@@ -30,7 +30,7 @@ pub struct TargetTimesIterator {
 impl TargetTimesIterator {
 	#[must_use]
 	pub fn new(start: DateTime<Utc>, end: DateTime<Utc>, resolution: Resolution) -> Self {
-		Self { current: start, end, resolution, system: System::new_all() }
+		Self { current: start, end, resolution, system: crate::helpers::memory_only_system() }
 	}
 
 	/// Estimates the total number of timestamps that will be generated

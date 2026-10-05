@@ -19,6 +19,11 @@ mod splines;
 mod tests;
 mod types;
 
+// Compile and run the README's examples as doctests, so they can't drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 /// When gpu-eager-init feature is enabled, run GPU prewarm BEFORE main()
 /// This eliminates any latency on the first interpolation call
 #[cfg(feature = "gpu-eager-init")]
@@ -60,7 +65,7 @@ pub use splines::{DAYS_IN_MONTH, DAYS_IN_YEAR, SECONDS_IN_DAY, SECONDS_IN_HOUR, 
 /// Returns an error if GPU is unavailable or initialization fails.
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
 ///     // Pre-warm GPU at startup to avoid first-use latency
@@ -110,11 +115,11 @@ pub fn prewarm_gpu() -> Result<()> {
 ///
 /// [`GpuConfig::buffer_pool`] and [`GpuConfig::num_staging_buffers`] are applied to the
 /// interpolator. [`GpuConfig::max_command_batch_size`] is **reserved** — command batching is
-/// not implemented yet (roadmap Phase 5.1), so that field currently has no effect. It is
+/// not implemented yet (see "Command batching" in ROADMAP.md), so that field currently has no effect. It is
 /// recorded and readable via [`effective_gpu_config`], not acted on.
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
 /// use splimes::GpuConfig;
 ///
 /// #[tokio::main]
@@ -158,12 +163,13 @@ pub fn effective_gpu_config() -> GpuConfig {
 /// Returns an error if GPU interpolator is not initialized.
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
 /// let stats = splimes::gpu_buffer_pool_stats()?;
 /// println!("Pool: {} buffers, {:.1} MB allocated",
 ///     stats.total_buffers,
 ///     stats.total_allocated_bytes as f64 / 1024.0 / 1024.0
 /// );
+/// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn gpu_buffer_pool_stats() -> Result<BufferPoolStats> {
 	Ok(gpu::types::GpuInterpolator::get_buffer_pool_static()?.stats())

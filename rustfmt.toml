@@ -1,0 +1,8 @@
+max_width = 10000
+tab_spaces = 8
+hard_tabs = true
+imports_layout = "Horizontal"
+imports_granularity = "Crate"
+reorder_imports = true
+group_imports = "StdExternalCrate"
+reorder_impl_items = true

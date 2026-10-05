@@ -1,50 +1,50 @@
 [package]
 name = "splimes"
-version.workspace = true
+version = "0.1.0"
 edition = "2024"
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
+rust-version = "1.95"
+authors = ["Justin Icenhour"]
+license = "MIT"
+repository = "https://github.com/basic-automation/splimes"
+documentation = "https://docs.rs/splimes"
 readme = "README.md"
-description = "Spline interpolation over irregular time series, on CPU (SIMD/rayon) or GPU (wgpu), with provenance-labelled output points."
+description = "Spline interpolation over irregularly sampled time series, on SIMD/parallel CPU or GPU (wgpu), with BigDecimal values."
 keywords = ["spline", "interpolation", "timeseries", "gpu", "simd"]
 categories = ["mathematics", "science", "algorithms"]
-
+exclude = [".github/", "assets/", "deny.toml", "rustfmt.toml"]
 
 [features]
 default = []
+# Initialise the GPU interpolator at process start (via a `ctor`) instead of on first use.
 gpu-eager-init = ["dep:ctor"]
 
 [dependencies]
-ctor = { workspace = true, optional = true }
-anyhow = { workspace = true }
-chrono = { workspace = true }
-bigdecimal = { workspace = true, features = ["serde"] }
-thiserror = { workspace = true }
-wgpu = { workspace = true }
-bytemuck = { workspace = true }
-wide = { workspace = true }
-rayon = { workspace = true }
-tokio = { workspace = true }
-sysinfo = { workspace = true }
-tempfile = { workspace = true }
-fake = { workspace = true, features = ["derive", "bigdecimal", "chrono"] }
-serde = { workspace = true, features = ["derive"] }
+anyhow = "1"
+bigdecimal = { version = "0.4", features = ["serde"] }
+bytemuck = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+ctor = { version = "1.0", optional = true }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+sysinfo = "0.39"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+wgpu = "30"
+wide = "1"
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports", "async_futures"] }
+crossterm = { version = "0.29", features = ["event-stream", "filedescriptor", "libc", "osc52", "serde"] }
+fake = { version = "5", features = ["derive", "bigdecimal", "chrono"] }
 # Parses and validates the WGSL shaders in unit tests, with no GPU needed. Same major as
 # the naga wgpu uses, so it adds no extra build.
 naga = { version = "30", features = ["wgsl-in"] }
-criterion = { workspace = true, features = ["async_futures"] }
-rand = { workspace = true }
-rand_chacha = { workspace = true }
-bigdecimal = { workspace = true, features = ["serde"] }
-chrono = { workspace = true }
-serial_test = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
-ratatui = { workspace = true, features = ["default", "all-widgets", "document-features", "macros", "palette", "scrolling-regions", "serde", "termion", "termwiz"] }
-crossterm = { workspace = true, features = ["event-stream", "filedescriptor", "libc", "osc52", "serde"]}
+rand = "0.10"
+rand_chacha = "0.10"
+ratatui = { version = "0.30", features = ["default", "all-widgets", "document-features", "macros", "palette", "scrolling-regions", "serde", "termion", "termwiz"] }
+serial_test = { version = "4", default-features = false, features = ["async"] }
+tokio = { version = "1", features = ["full"] }
 
 [[bench]]
 name = "interpolation"

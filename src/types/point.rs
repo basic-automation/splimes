@@ -1,8 +1,7 @@
 use std::fmt::Debug;
 
-use bigdecimal::{BigDecimal, FromPrimitive};
-use chrono::{DateTime, Duration, Utc};
-use fake::{Fake, Faker};
+use bigdecimal::BigDecimal;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,12 +16,17 @@ impl Point {
 		Self { timestamp, value }
 	}
 
-	/// Generate a random Point for testing
+	/// Generate a random Point for testing.
 	///
 	/// # Panics
 	/// Panics if the random f64 value cannot be converted to `BigDecimal` (should never happen)
+	#[cfg(test)]
 	#[must_use]
 	pub fn random() -> Self {
+		use bigdecimal::FromPrimitive;
+		use chrono::Duration;
+		use fake::{Fake, Faker};
+
 		let base_time = Utc::now();
 		let offset_seconds: i64 = Faker.fake();
 		let offset_seconds = offset_seconds.rem_euclid(61) - 30; // -30 to 30

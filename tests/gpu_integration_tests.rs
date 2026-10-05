@@ -12,15 +12,15 @@ use serial_test::serial;
 use splimes::{GpuConfig, effective_gpu_config, gpu_buffer_pool_stats, gpu_config_applied, prewarm_gpu, prewarm_gpu_with_config};
 
 /// `true` when a GPU adapter is available. Without one the test is skipped with a notice,
-/// unless `WEFT_REQUIRE_GPU` is set, in which case a missing adapter fails it (CI sets it,
+/// unless `SPLIMES_REQUIRE_GPU` is set, in which case a missing adapter fails it (CI sets it,
 /// on a software Vulkan driver, so GPU coverage can't silently disappear). Mirrors
 /// `splimes::tests::gpu_available_or_skip`, which an integration test can't reach.
 fn gpu_available_or_skip(test: &str) -> bool {
 	match prewarm_gpu() {
 		Ok(()) => true,
-		Err(e) if std::env::var_os("WEFT_REQUIRE_GPU").is_some() => panic!("{test}: WEFT_REQUIRE_GPU is set but no GPU adapter is available: {e:#}"),
+		Err(e) if std::env::var_os("SPLIMES_REQUIRE_GPU").is_some() => panic!("{test}: SPLIMES_REQUIRE_GPU is set but no GPU adapter is available: {e:#}"),
 		Err(e) => {
-			eprintln!("{test}: skipped, no GPU adapter ({e:#}); set WEFT_REQUIRE_GPU=1 to make this a failure");
+			eprintln!("{test}: skipped, no GPU adapter ({e:#}); set SPLIMES_REQUIRE_GPU=1 to make this a failure");
 			false
 		}
 	}
