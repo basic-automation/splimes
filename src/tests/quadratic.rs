@@ -12,6 +12,10 @@ mod tests {
 	#[tokio::test]
 	#[serial(gpu_tests)]
 	async fn test_quadratic_interpolation() {
+		if !crate::tests::gpu_available_or_skip("Quadratic") {
+			return;
+		}
+
 		// Clear GPU buffer pool for test isolation
 		GpuInterpolator::clear_buffer_pool_static().expect("Failed to clear GPU buffer pool");
 

@@ -30,6 +30,10 @@ pub mod regression_tests {
 	#[tokio::test]
 	#[serial(gpu_tests)]
 	async fn test_regression_output_consistency() {
+		if !crate::tests::gpu_available_or_skip("Regression output consistency") {
+			return;
+		}
+
 		// Clear GPU buffer pool for test isolation
 		GpuInterpolator::clear_buffer_pool_static().expect("Failed to clear GPU buffer pool");
 
@@ -112,7 +116,8 @@ pub mod regression_tests {
 	#[serial(gpu_tests)]
 	async fn test_regression_deterministic_output() {
 		// Clear GPU buffer pool for test isolation
-		GpuInterpolator::clear_buffer_pool_static().expect("Failed to clear GPU buffer pool");
+		// Without a GPU there is no pool to clear (interpolation falls back to CPU).
+		let _ = GpuInterpolator::clear_buffer_pool_static();
 
 		let resolution = Resolution::Seconds;
 		let start_base = Utc::now();
