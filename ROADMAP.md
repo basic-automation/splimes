@@ -23,7 +23,7 @@ over `BigDecimal` values.
 - [x] README example compiled and run as a doctest; the previously `ignore`d API examples are compile-checked (one was broken)
 - [x] CI: rustfmt, clippy (defect categories), MSRV, tests on Linux (lavapipe, GPU required) / macOS / Windows (WARP, the f32 path), rustdoc, `cargo package`, cargo-deny
 - [x] Published 0.1.0 to crates.io (2026-10-05)
-- [ ] Switch WeftDB from the in-tree copy to `splimes = "0.1"`
+- [x] ~~Switch WeftDB from the in-tree copy to `splimes = "0.1"`~~ *Superseded* by the switch to `splimes = "1"` (below)
 
 ---
 
@@ -32,6 +32,10 @@ over `BigDecimal` values.
 1.0 is a semver promise: the public API, the numerical behaviour, and the MSRV policy.
 splimes ships 1.0 when every box below is ticked, or the item is explicitly dropped or
 deferred with a reason.
+
+**Shipped as 1.0.0 on 2026-10-05.** Three items are deferred past 1.0: two portability
+items, which need hardware the project doesn't have, and WeftDB's switch, which needed
+the published crate and is in progress.
 
 ### Correctness
 
@@ -63,8 +67,8 @@ deferred with a reason.
 
 ### Portability
 
-- [ ] **Conformance matrix**: measured on NVIDIA (f64 and f32) and the CPU; CI measures lavapipe (f64) on every run, and WARP and Metal (f32) when the runners expose them. **Still missing: AMD, Intel and Apple hardware**
-- [ ] **Real-GPU CI**: needs a self-hosted or GPU runner; CI covers software adapters only
+- [ ] **Conformance matrix** *(deferred past 1.0: needs the hardware)*: measured on NVIDIA (f64 and f32) and the CPU. CI measures lavapipe (f64 and f32) on every run, and WARP and Metal (f32) when the runners expose them, as they did for 1.0.0. The macOS runner's Metal device gave the first Apple result: worst 3.1e-7 on the conformance matrix, against the 1e-5 bound (BENCHMARKS.md). **Still missing: AMD and Intel GPUs, and Apple silicon outside a virtual machine**
+- [ ] **Real-GPU CI** *(deferred past 1.0)*: needs a self-hosted or GPU runner; CI covers software and virtualised adapters only
 
 ### Release engineering
 
@@ -73,10 +77,10 @@ deferred with a reason.
 - [x] MSRV policy written down: raising it is a minor-version change, only to a toolchain at least six months old (README, crate docs)
 - [x] Release automation: a `vX.Y.Z` tag runs CI, checks the tag against `Cargo.toml` and the changelog, publishes to crates.io with trusted publishing, and creates the GitHub release
 - [x] **Adversarial review.** Two multi-agent review passes (six dimensions, each finding checked by three independent skeptics, then a per-fix verification and regression hunt) confirmed and fixed 33 distinct defects (and a dozen smaller residuals), from silent wrong values and process crashes to test gaps; each fix's regression test is in the suite
-- [ ] Merge `release/1.0`
-- [ ] Configure crates.io trusted publishing for `release.yml` (one-time, on crates.io)
-- [ ] Date the 1.0.0 changelog entry and push the `v1.0.0` tag
-- [ ] Switch WeftDB to `splimes = "1"` ([MIGRATING.md](MIGRATING.md))
+- [x] Merged `release/1.0` ([#1](https://github.com/basic-automation/splimes/pull/1))
+- [x] crates.io trusted publishing for `release.yml`, the only way to publish: the crate refuses new versions published with an API token, and the GitHub `release` environment deploys only from `v*` tags
+- [x] Published 1.0.0 to crates.io from the `v1.0.0` tag (2026-10-05)
+- [ ] Switch WeftDB to `splimes = "1"` ([MIGRATING.md](MIGRATING.md)) *(deferred past 1.0: it needs the published crate; in progress)*
 
 ---
 

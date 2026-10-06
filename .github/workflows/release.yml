@@ -7,6 +7,11 @@ name: Release
 # repository. One-time setup on crates.io: splimes → Settings → Trusted Publishing →
 # add GitHub, repository `basic-automation/splimes`, workflow `release.yml`,
 # environment `release`.
+#
+# This is the only way to publish. On crates.io the crate requires trusted publishing
+# for all new versions, so API tokens are refused; on GitHub the `release` environment
+# deploys only from tags matching `v*` (Settings → Environments → release). Whoever can
+# push a `v*` tag can therefore publish.
 
 on:
   push:
