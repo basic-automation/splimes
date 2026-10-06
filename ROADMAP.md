@@ -87,6 +87,7 @@ the published crate and is in progress.
 ## Later / not before 1.0
 
 - [ ] More methods: Akima and monotone (PCHIP) splines, which avoid cubic overshoot on step-like data
+- [ ] Raise `MAX_POLYNOMIAL_DEGREE` above 8. Allowing more is additive, so it can ship in a 1.x minor release. The cap is about usefulness: noise amplification on evenly spaced knots is about 11× at degree 8, 30× at 10 and 500× at 15, and worse on irregular spacing. Constants derived for degree 8 also limit it: `F32_GAP_RATIO` (1024⁸ = 2⁸⁰ inside `f32`; degree 12 reaches 2¹²⁰), `SCALE_FROM` (256⁸ = 2⁶⁴; degree 16 overflows `f32`), and `MAX_WINDOW`, which sizes the CPU and WGSL stack arrays for every method. Before raising it: derive those bounds per window instead of fixing them, measure the cost of larger windows to linear and cubic and GPU register use, and extend `tests/contract.rs` to the new maximum. For high degree, a global Chebyshev or barycentric fit may be the better method
 - [ ] Multi-GPU *(only once single-GPU wins are proven)*
 - [ ] Faster exact time differences: an `i64` fast path for series spanning under 292 years, which is nearly all of them (single-threaded degree 8 is about 2× linear today)
 - [ ] Parallel input preparation for million-point inputs (sorting and de-duplicating is single-threaded)
