@@ -45,7 +45,7 @@ Cubic, 4,096 input points, `run_f64`. Criterion medians.
 The GPU's kernel time is a small part of each call. Building the output (a timestamp,
 a value and a provenance label per point, about 30 bytes of fresh memory) costs the same
 whichever backend produced the values, and the GPU adds an upload of the grid times
-(exact hi/lo pairs, prepared on the host) and a read-back. On this machine that leaves
+(96-bit integers, prepared on the host) and a read-back. On this machine that leaves
 the GPU level with rayon, or modestly ahead in `f32` at the largest sizes, and behind it
 below a million points.
 

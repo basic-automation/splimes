@@ -44,8 +44,9 @@ its replacement and lists the results that change.
 - `calibrate()`, `auto_thresholds()` and `set_auto_thresholds()`: measure this
   machine's CPU and GPU crossovers, in both GPU precisions, instead of trusting fixed
   thresholds. `AutoThresholds` has a GPU threshold per precision.
-- `Precision::F32` for the GPU, using split (hi/lo) `f32` times so long series keep
-  their resolution in single precision. Points where the `f32` kernel overflows but
+- `Precision::F32` for the GPU. Times are 96-bit integer nanoseconds on the GPU too, so
+  long series keep their resolution in single precision, and compilers that reassociate
+  floating point (Metal's fast math) can't undo it. Points where the `f32` kernel overflows but
   `f64` wouldn't are recomputed in `f64` on the CPU.
 - `Interpolator::max_points`, to refuse oversized grids from untrusted input before
   allocating.
@@ -68,7 +69,7 @@ its replacement and lists the results that change.
 - **Time is exact, and never truncated to the resolution.** 0.1's CPU paths measured
   knot spacing in whole resolution units, so hourly output from sub-hour data saw
   coincident knots. All paths now take every time difference exactly, in integer
-  nanoseconds (exact hi/lo pairs on the GPU), so accuracy doesn't degrade with the
+  nanoseconds (96-bit integer arithmetic on the GPU), so accuracy doesn't degrade with the
   length of the series.
 - **Time is on the POSIX scale.** A leap second (`23:59:60.x`, which chrono can
   represent) is the same instant as `00:00:00.x` the next second, for inputs, `start`
