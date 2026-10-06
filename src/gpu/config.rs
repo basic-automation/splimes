@@ -14,7 +14,7 @@ pub struct GpuConfig {
 	pub max_pool_bytes: u64,
 	/// Grid points per GPU dispatch (default 4 Mi). A call holds buffers for at most two
 	/// chunks at a time, so this bounds a call's GPU memory: per chunk point, up to about
-	/// 96 bytes in `f64` (48 in `f32`) — output, read-back and grid-time buffers, plus
+	/// 80 bytes in `f64` (64 in `f32`) — output, read-back and grid-time buffers, plus
 	/// wgpu's temporary upload copy — with the chunk rounded up to a power of two, plus
 	/// the inputs. Larger chunks mean fewer round trips. Clamped to the adapter's
 	/// storage-buffer binding limit.
@@ -48,8 +48,8 @@ impl GpuConfig {
 	}
 
 	/// Large buffers and pool, for big jobs on machines with memory to spare: 16 Mi points
-	/// per dispatch, and a pool (1 GiB + 1 MiB) that keeps both of a call's `f64` buffer
-	/// sets for the next call.
+	/// per dispatch, and a pool (1 GiB + 1 MiB) that keeps both of a call's buffer sets
+	/// for the next call.
 	#[must_use]
 	pub const fn high_performance() -> Self {
 		Self { max_pool_bytes: (1 << 30) + (1 << 20), chunk_points: 16 << 20, low_power: false }

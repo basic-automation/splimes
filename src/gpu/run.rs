@@ -8,9 +8,7 @@ use rayon::prelude::*;
 use wgpu::{BindGroupDescriptor, BindGroupEntry, Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ErrorFilter, MapMode, PollType};
 
 use super::{GpuPoolStats, context::Context};
-use crate::{
-	Error, Precision, Result, kernel::Method, prepare::Knots, time::{Grid, nanos_to_f64, nanos_to_f64_pair}, value::Value
-};
+use crate::{Error, Precision, Result, kernel::Method, prepare::Knots, time::Grid, value::Value};
 
 const WORKGROUP: u32 = 256;
 /// Dispatches have at most 65,535 workgroups per dimension.
@@ -53,32 +51,26 @@ pub fn captured<T>(device: &wgpu::Device, f: impl FnOnce() -> Result<T>) -> Resu
 	errors.into_iter().next().map_or(result, |e| Err(Error::Gpu(e.to_string())))
 }
 
-/// A time as the kernel stores it: an exact hi/lo pair of nanoseconds for f64, or a hi/lo
-/// pair of normalised time for f32 (whose time scale is then 1).
-fn times(precision: Precision, knots_h: f64, offsets: impl Iterator<Item = i128>, out: &mut Vec<u8>) {
-	match precision {
-		Precision::F64 => {
-			for o in offsets {
-				out.extend_from_slice(bytemuck::cast_slice(&nanos_to_f64_pair(o)));
-			}
-		}
-		Precision::F32 => {
-			for o in offsets {
-				out.extend_from_slice(bytemuck::cast_slice(&split(nanos_to_f64(o) / knots_h)));
-			}
-		}
+/// Times as the kernels store them: 96-bit two's-complement nanoseconds since the first
+/// knot, as `[low, middle, high]` words. Any two instants chrono can represent are less
+/// than 2⁷⁴ ns apart, so every offset and every difference fits.
+fn times(offsets: impl Iterator<Item = i128>, out: &mut Vec<u8>) {
+	for o in offsets {
+		#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Two's-complement words.
+		let words = [o as u32, (o >> 32) as u32, (o >> 64) as u32];
+		out.extend_from_slice(bytemuck::cast_slice(&words));
 	}
 }
 
-/// Bytes of grid times each host task writes into staging memory: 16 Ki points in f64,
-/// 32 Ki in f32. A whole number of either time pair.
-const STAGE_BLOCK: usize = 256 * 1024;
+/// Bytes of grid times each host task writes into staging memory: 16 Ki points of 12
+/// bytes.
+const STAGE_BLOCK: usize = 12 * 16 * 1024;
 
 fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, out: &mut [f64]) -> Result<Vec<Slot>> {
 	let elem = precision_bytes(precision);
-	let time_bytes = 2 * elem;
-	// The same, as a host buffer length.
-	let pair_len: usize = if precision == Precision::F64 { 16 } else { 8 };
+	// A time is three u32 words, in either precision.
+	let time_bytes: u64 = 12;
+	let pair_len: usize = 12;
 	let n = knots.len();
 	if n as u64 * time_bytes > ctx.max_binding_bytes {
 		return Err(Error::Gpu(format!("{n} knots exceed {}'s storage-binding limit of {} bytes", ctx.info.name, ctx.max_binding_bytes)));
@@ -86,7 +78,7 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 	let n_u32 = u32::try_from(n).map_err(|_| Error::Gpu(format!("{n} knots exceed the GPU kernel's u32 indexing")))?;
 
 	let mut knot_u = Vec::with_capacity(n * pair_len);
-	times(precision, knots.h, knots.offsets.iter().copied(), &mut knot_u);
+	times(knots.offsets.iter().copied(), &mut knot_u);
 	let knot_y: Vec<u8> = match precision {
 		Precision::F64 => bytemuck::cast_slice(&knots.y).to_vec(),
 		#[allow(clippy::cast_possible_truncation)] // Single precision is what was asked for.
@@ -97,8 +89,8 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 
 	#[allow(clippy::cast_possible_truncation)] // Bounded by MAX_CHUNK.
 	let chunk = u64::from(ctx.config.chunk_points.max(1)).min(MAX_CHUNK).min(ctx.max_binding_bytes / time_bytes) as usize;
-	// f64 times are nanoseconds, scaled by 1/h in the kernel; f32 times are normalised already.
-	let inv_h = if precision == Precision::F64 { 1.0 / knots.h } else { 1.0 };
+	// Times are nanoseconds in both kernels, scaled by 1/h.
+	let inv_h = 1.0 / knots.h;
 	let (lo, hi) = method.bounds.unwrap_or((0.0, 0.0));
 	#[allow(clippy::cast_possible_truncation)] // `len <= MAX_CHUNK`, which fits u32.
 	let header = |len: usize| [n_u32, method.window as u32, u32::from(method.hold), u32::from(method.bounds.is_some()), len as u32, 0, 0, 0];
@@ -129,7 +121,7 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 		let per_block = STAGE_BLOCK / pair_len;
 		let fill = |from: usize, mut part: wgpu::WriteOnly<'_, [u8]>| {
 			let mut bytes = Vec::with_capacity(part.len());
-			times(precision, knots.h, grid.offsets(knots.t0, from).take(part.len() / pair_len), &mut bytes);
+			times(grid.offsets(knots.t0, from).take(part.len() / pair_len), &mut bytes);
 			part.copy_from_slice(&bytes);
 		};
 		let blocks: Vec<wgpu::WriteOnly<'_, [u8; STAGE_BLOCK]>> = blocks.into_iter().collect();
@@ -210,13 +202,6 @@ fn read_back(ctx: &Context, (slot, first, len, submission): (Slot, usize, usize,
 	Ok(slot)
 }
 
-/// `t` as `[hi, lo]` with `hi + lo ≈ t` to about 48 bits.
-#[allow(clippy::cast_possible_truncation)]
-fn split(t: f64) -> [f32; 2] {
-	let hi = t as f32;
-	[hi, (t - f64::from(hi)) as f32]
-}
-
 const fn precision_bytes(precision: Precision) -> u64 {
 	match precision {
 		Precision::F64 => 8,
@@ -238,8 +223,8 @@ pub struct Slot {
 
 impl Slot {
 	const fn bytes(&self) -> u64 {
-		// Output and staging values, plus a two-scalar time per point, plus the params.
-		self.capacity as u64 * 4 * precision_bytes(self.precision) + 64
+		// Output and staging values, plus a 12-byte time per point, plus the params.
+		self.capacity as u64 * (2 * precision_bytes(self.precision) + 12) + 64
 	}
 }
 
@@ -276,7 +261,7 @@ fn acquire(ctx: &Context, precision: Precision, len: usize) -> Slot {
 	let capacity = len.next_power_of_two();
 	let elem = precision_bytes(precision);
 	let buffer = |label, size, usage| ctx.device.create_buffer(&BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
-	Slot { precision, capacity, out: buffer("splimes output", capacity as u64 * elem, BufferUsages::STORAGE | BufferUsages::COPY_SRC), staging: buffer("splimes staging", capacity as u64 * elem, BufferUsages::MAP_READ | BufferUsages::COPY_DST), params: buffer("splimes params", 64, BufferUsages::UNIFORM | BufferUsages::COPY_DST), grid: buffer("splimes grid", capacity as u64 * 2 * elem, BufferUsages::STORAGE | BufferUsages::COPY_DST) }
+	Slot { precision, capacity, out: buffer("splimes output", capacity as u64 * elem, BufferUsages::STORAGE | BufferUsages::COPY_SRC), staging: buffer("splimes staging", capacity as u64 * elem, BufferUsages::MAP_READ | BufferUsages::COPY_DST), params: buffer("splimes params", 64, BufferUsages::UNIFORM | BufferUsages::COPY_DST), grid: buffer("splimes grid", capacity as u64 * 12, BufferUsages::STORAGE | BufferUsages::COPY_DST) }
 }
 
 fn release(ctx: &Context, slots: Vec<Slot>) {
@@ -297,7 +282,7 @@ fn release(ctx: &Context, slots: Vec<Slot>) {
 pub mod tests {
 	use std::cell::Cell;
 
-	use super::{captured, split};
+	use super::{captured, times};
 	use crate::Error;
 
 	thread_local! {
@@ -323,11 +308,16 @@ pub mod tests {
 	}
 
 	#[test]
-	fn split_keeps_precision_far_beyond_f32() {
-		for t in [0.0, 1.5, 16_777_217.25, 123_456_789.123_456, -9_876_543.210_987] {
-			let [hi, lo] = split(t);
-			let back = f64::from(hi) + f64::from(lo);
-			assert!((back - t).abs() <= t.abs() * 2f64.powi(-46), "{t} -> {back}");
+	fn times_are_twos_complement_words() {
+		let span = crate::time::posix_nanos(chrono::DateTime::<chrono::Utc>::MAX_UTC) - crate::time::posix_nanos(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+		for o in [0_i128, 1, -1, 4_294_967_296, -4_294_967_297, 1 << 62, span, -span] {
+			let mut bytes = Vec::new();
+			times(std::iter::once(o), &mut bytes);
+			let words: &[u32] = bytemuck::cast_slice(&bytes);
+			// Sign-extend the 96-bit value back to i128.
+			let raw = i128::from(words[0]) | (i128::from(words[1]) << 32) | (i128::from(words[2]) << 64);
+			let back = (raw << 32) >> 32;
+			assert_eq!(back, o, "{o}");
 		}
 	}
 }

@@ -35,15 +35,6 @@ pub fn nanos_to_f64(nanos: i128) -> f64 {
 	i64::try_from(nanos).map_or(nanos as f64, |n| n as f64)
 }
 
-/// `nanos` as `[hi, lo]` with `hi + lo == nanos` exactly (for anything below 2¹⁰⁶).
-#[cfg(feature = "gpu")]
-pub fn nanos_to_f64_pair(nanos: i128) -> [f64; 2] {
-	let hi = nanos_to_f64(nanos);
-	#[allow(clippy::cast_possible_truncation)] // `hi` is an integer within i128's range.
-	let rest = nanos - hi as i128;
-	[hi, nanos_to_f64(rest)]
-}
-
 /// The output grid: `start, start + step, …` up to and including `end`, on the POSIX
 /// scale.
 #[derive(Debug, Clone, Copy)]

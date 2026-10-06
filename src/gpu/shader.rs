@@ -1,17 +1,14 @@
 //! The WGSL kernels: a line-by-line port of `kernel::eval`.
 //!
-//! One template, two instantiations. Every time — knot or grid point — is a pair of
-//! scalars `(hi, lo)` with `hi + lo` the time, written by the host from exact integers.
-//! A difference is `(a.hi - b.hi) + (a.lo - b.lo)`: when `a` and `b` are near each other,
-//! as every pair in a local window is, the `hi` difference is exact (Sterbenz), so the
-//! result carries one rounding however far the times are from the origin. That is what
-//! the CPU kernel gets by subtracting integer nanoseconds.
-//!
-//! - **f64**: times are nanoseconds since the first knot, split exactly; differences are
-//!   multiplied by `1/h`, the reciprocal mean knot spacing, as on the CPU.
-//! - **f32**: times are already normalised (divided by `h` on the host), split to about
-//!   48 bits, and the multiplier is 1. Without the split, times past 2²⁴ ≈ 16.7 M spacings would
-//!   lose whole units.
+//! One template, two instantiations (`S` = `f64` or `f32`). Every time — knot or grid
+//! point — is nanoseconds since the first knot as a 96-bit two's-complement integer in
+//! three `u32` words, written by the host; 96 bits cover chrono's whole range (about 2⁷³
+//! ns) with room to subtract. A difference is taken in integer arithmetic with an
+//! explicit borrow, converted from sign and magnitude (so no floating-point cancellation),
+//! and scaled by `1/h`. That is exactly what the CPU kernel does with `i128`, and in `f64`
+//! it gives the same, correctly rounded value. Being integer arithmetic, it also survives
+//! compilers that reassociate floating point: Metal compiles shaders with fast math, and
+//! an earlier hi/lo floating-point split lost its precision there.
 
 /// The shared body. The scalar `S` and `SUB` are supplied per precision.
 const BODY: &str = r"
@@ -30,15 +27,42 @@ struct Params {
     _pad3: S,
 }
 
-@group(0) @binding(0) var<storage, read> knot_t: array<vec2<S>>;
+@group(0) @binding(0) var<storage, read> knot_t: array<u32>;
 @group(0) @binding(1) var<storage, read> knot_y: array<S>;
 @group(0) @binding(2) var<storage, read_write> out: array<S>;
 @group(0) @binding(3) var<uniform> params: Params;
-@group(0) @binding(4) var<storage, read> grid_t: array<vec2<S>>;
+@group(0) @binding(4) var<storage, read> grid_t: array<u32>;
 
-// (a - b) / h, with the subtraction done on hi/lo pairs: `kernel::diff`.
-fn diff(a: vec2<S>, b: vec2<S>) -> S {
-    return ((a.x - b.x) + (a.y - b.y)) * params.inv_h;
+fn knot_time(i: u32) -> vec3<u32> {
+    return vec3<u32>(knot_t[3u * i], knot_t[3u * i + 1u], knot_t[3u * i + 2u]);
+}
+
+fn grid_time(i: u32) -> vec3<u32> {
+    return vec3<u32>(grid_t[3u * i], grid_t[3u * i + 1u], grid_t[3u * i + 2u]);
+}
+
+// (a - b) / h for 96-bit nanosecond times stored as (low, middle, high) words:
+// `kernel::diff`. Integer subtraction with borrow, then sign and magnitude, so there is no
+// floating-point cancellation for a compiler to reassociate.
+fn diff(a: vec3<u32>, b: vec3<u32>) -> S {
+    let d0 = a.x - b.x;
+    let borrow0 = select(0u, 1u, a.x < b.x);
+    let d1 = a.y - b.y - borrow0;
+    let borrow1 = select(0u, 1u, a.y < b.y || (a.y == b.y && borrow0 == 1u));
+    let d2 = a.z - b.z - borrow1;
+    let negative = (d2 & 0x80000000u) != 0u;
+    var m0 = d0;
+    var m1 = d1;
+    var m2 = d2;
+    if (negative) {
+        m0 = ~d0 + 1u;
+        let carry0 = select(0u, 1u, m0 == 0u);
+        m1 = ~d1 + carry0;
+        let carry1 = select(0u, 1u, carry0 == 1u && m1 == 0u);
+        m2 = ~d2 + carry1;
+    }
+    let magnitude = S(m2) * S(18446744073709551616.0) + (S(m1) * S(4294967296.0) + S(m0));
+    return select(magnitude, -magnitude, negative) * params.inv_h;
 }
 
 @compute @workgroup_size(256)
@@ -47,7 +71,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (idx >= params.count) {
         return;
     }
-    let t = grid_t[idx];
+    let t = grid_time(idx);
     let n = params.n;
     let zero = S(0.0);
 
@@ -56,7 +80,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var hi = n;
     while (lo < hi) {
         let mid = (lo + hi) / 2u;
-        if (diff(t, knot_t[mid]) >= zero) {
+        if (diff(t, knot_time(mid)) >= zero) {
             lo = mid + 1u;
         } else {
             hi = mid;
@@ -64,8 +88,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let p = lo;
 
-    let below = diff(t, knot_t[0]) < zero;
-    let outside = below || diff(t, knot_t[n - 1u]) > zero;
+    let below = diff(t, knot_time(0)) < zero;
+    let outside = below || diff(t, knot_time(n - 1u)) > zero;
     if (params.hold != 0u && outside) {
         out[idx] = select(knot_y[n - 1u], knot_y[0], below);
         return;
@@ -77,7 +101,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (m == 1u) {
         v = knot_y[start];
     } else if (m == 2u) {
-        let alpha = diff(t, knot_t[start]) / diff(knot_t[start + 1u], knot_t[start]);
+        let alpha = diff(t, knot_time(start)) / diff(knot_time(start + 1u), knot_time(start));
         v = knot_y[start] + alpha * (knot_y[start + 1u] - knot_y[start]);
     } else {
         // Exact differences for every point, Lagrange weights, scaled products far out:
@@ -85,7 +109,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         var dt: array<S, MAX_WINDOW>;
         var s = S(1.0);
         for (var k = 0u; k < m; k++) {
-            dt[k] = diff(t, knot_t[start + k]);
+            dt[k] = diff(t, knot_time(start + k));
             s = max(s, abs(dt[k]));
         }
         let scaled = s > S(SCALE_FROM);
@@ -99,7 +123,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             var denominator = S(1.0);
             for (var k = 0u; k < m; k++) {
                 if (k != j) {
-                    denominator = denominator * diff(knot_t[start + j], knot_t[start + k]);
+                    denominator = denominator * diff(knot_time(start + j), knot_time(start + k));
                 }
             }
             var term = knot_y[start + j] / denominator;

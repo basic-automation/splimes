@@ -361,14 +361,20 @@ fn far_bounded_extrapolation_lands_on_the_right_bound() {
 	for (values, lo, hi) in [(&rising, -4.25, 12.75), (&falling, -12.75, 4.25)] {
 		for far in [TimeDelta::days(3), TimeDelta::days(7), TimeDelta::days(365)] {
 			let at = timestamps[8] + far;
-			let cpu_free = Interpolator::new(Spline::Polynomial(8, None), Resolution::Seconds).backend(Backend::Cpu).run_f64(&timestamps, values, at, at).expect("cpu").values()[0];
+			let points: Vec<Point> = timestamps.iter().zip(values.iter()).map(|(&t, &v)| Point::new(t, format!("{v:e}").parse().expect("finite"))).collect();
+			let (exact_free, lebesgue) = exact_with_lebesgue(&points, Spline::Polynomial(8, None), at);
+			let exact_free = to_f64(&exact_free);
 			for &(backend, precision) in &configs {
 				let bounded = Interpolator::new(Spline::Polynomial(8, Some(0.5)), Resolution::Seconds).backend(backend).gpu_precision(precision).run_f64(&timestamps, values, at, at).expect("runs").values()[0];
 				let expected = if values[8] > 0.0 { hi } else { lo };
 				assert_eq!(bounded, expected, "bounded, {far} out, on {backend} {precision}");
 				assert!(bounded >= lo && bounded <= hi);
+				// Unbounded, the value is enormous (and in f32 near the top of its range), but it
+				// must still be finite and within the published contract — not a wrong number.
 				let free = Interpolator::new(Spline::Polynomial(8, None), Resolution::Seconds).backend(backend).gpu_precision(precision).run_f64(&timestamps, values, at, at).expect("runs").values()[0];
-				assert!((free - cpu_free).abs() <= 1e-5 * cpu_free.abs(), "unbounded, {far} out, on {backend} {precision}: {free} vs {cpu_free}");
+				let allowed = bound(precision, 8) * 8.5 * lebesgue + f64::EPSILON * exact_free.abs();
+				assert!((free - exact_free).abs() <= allowed, "unbounded, {far} out, on {backend} {precision}: {free} vs exact {exact_free}");
+				assert_eq!(free.signum(), exact_free.signum());
 			}
 		}
 	}
