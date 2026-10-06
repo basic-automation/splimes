@@ -1,6 +1,6 @@
 [package]
 name = "splimes"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Justin Icenhour"]
@@ -8,60 +8,52 @@ license = "MIT"
 repository = "https://github.com/basic-automation/splimes"
 documentation = "https://docs.rs/splimes"
 readme = "README.md"
-description = "Spline interpolation over irregularly sampled time series, on SIMD/parallel CPU or GPU (wgpu), with BigDecimal values."
-keywords = ["spline", "interpolation", "timeseries", "gpu", "simd"]
+description = "Resample irregularly sampled time series onto a regular grid with local spline interpolation, on CPU (rayon) or GPU (wgpu), with BigDecimal or f64 values."
+keywords = ["spline", "interpolation", "timeseries", "resampling", "gpu"]
 categories = ["mathematics", "science", "algorithms"]
 exclude = [".github/", "assets/", "deny.toml", "rustfmt.toml"]
 
-[features]
-default = []
-# Initialise the GPU interpolator at process start (via a `ctor`) instead of on first use.
-gpu-eager-init = ["dep:ctor"]
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = ["gpu", "serde"]
+# The wgpu backend (Vulkan, Metal, DX12). Without it, `Backend::Gpu` returns
+# `Error::GpuUnavailable` and `Backend::Auto` always runs on the CPU.
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+# `Serialize`/`Deserialize` for `Point`, `Resolution`, `Spline` and `PointKind`.
+serde = ["dep:serde", "bigdecimal/serde", "chrono/serde"]
+# `interpolate_async` and friends: run an interpolation on tokio's blocking pool.
+tokio = ["dep:tokio"]
+
+# Floors are the oldest versions the crate builds and passes its tests against; CI checks
+# them with `-Z direct-minimal-versions`.
 [dependencies]
-anyhow = "1"
-bigdecimal = { version = "0.4", features = ["serde"] }
-bytemuck = { version = "1", features = ["derive"] }
-chrono = { version = "0.4", features = ["serde"] }
-ctor = { version = "1.0", optional = true }
-rayon = "1"
-serde = { version = "1", features = ["derive"] }
-sysinfo = "0.39"
-tempfile = "3"
-thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
-wgpu = "30"
-wide = "1"
+bigdecimal = "0.4.3"
+bytemuck = { version = "1.22", optional = true }
+chrono = { version = "0.4.35", default-features = false, features = ["std", "clock"] }
+log = "0.4.29"
+pollster = { version = "0.4", optional = true }
+rayon = "1.11"
+serde = { version = "1.0.166", features = ["derive"], optional = true }
+thiserror = "2.0.12"
+tokio = { version = "1", features = ["rt"], optional = true }
+wgpu = { version = "30", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports", "async_futures"] }
-crossterm = { version = "0.29", features = ["event-stream", "filedescriptor", "libc", "osc52", "serde"] }
-fake = { version = "5", features = ["derive", "bigdecimal", "chrono"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 # Parses and validates the WGSL shaders in unit tests, with no GPU needed. Same major as
 # the naga wgpu uses, so it adds no extra build.
 naga = { version = "30", features = ["wgsl-in"] }
-rand = "0.10"
-rand_chacha = "0.10"
-ratatui = { version = "0.30", features = ["default", "all-widgets", "document-features", "macros", "palette", "scrolling-regions", "serde", "termion", "termwiz"] }
-serial_test = { version = "4", default-features = false, features = ["async"] }
-tokio = { version = "1", features = ["full"] }
+serde_json = "1.0.100"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [[bench]]
 name = "interpolation"
 harness = false
 
-[[bench]]
-name = "gpu_prewarm"
-harness = false
-
-[[bench]]
-name = "gpu_cold"
-harness = false
-
-[[bench]]
-name = "should_use_gpu_analysis"
-harness = false
-
-[[bench]]
-name = "gpu_optimization_bench"
-harness = false
+# The contract tests compute an exact decimal reference; optimised dependencies keep
+# `cargo test` quick in debug builds. Profiles don't apply to crates that depend on this one.
+[profile.dev.package."*"]
+opt-level = 2

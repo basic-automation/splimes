@@ -30,46 +30,53 @@ over `BigDecimal` values.
 ## 1.0 release criteria
 
 1.0 is a semver promise: the public API, the numerical behaviour, and the MSRV policy.
-splimes ships 1.0 when every box below is ticked.
+splimes ships 1.0 when every box below is ticked, or the item is explicitly dropped or
+deferred with a reason.
 
 ### Correctness
 
-- [ ] **Graceful GPU failure.** No wgpu error handler is installed, so a validation or out-of-memory error **panics** (wgpu's default). Capture errors (`push_error_scope` / `on_uncaptured_error`) and fall back to the CPU path with a logged reason
-- [ ] **No panics in library code.** 38 `unwrap()`/`expect()` calls outside tests, including the global interpolator's `LazyLock` initialiser. Each becomes a typed error or a documented invariant
-- [ ] **Numerical tolerance contract.** Publish the CPU-vs-GPU and f64-vs-f32 tolerances per spline, enforced by tests, plus the NaN/∞ behaviour at the edges
-- [ ] **Extrapolation semantics documented and tested** for every method (linear tails, `Polynomial` `bounds_factor`, the 1-point and 2-point cases)
-- [ ] **Fallback transparency.** `auto_interpolate` silently steps down from cubic → quadratic → linear when there are too few points. Report the method actually used
+- [x] **Graceful GPU failure.** Every call runs inside wgpu error scopes (validation, out of memory, internal), an uncaptured-error handler logs stragglers instead of panicking, and a device-lost callback makes later calls fail fast. `Backend::Auto` reruns on the CPU, logs the reason and reports it in `Interpolation::gpu_fallback`. splimes never opens the device on a thread of its own (exiting mid-initialisation crashed some drivers); points the `f32` kernel can't compute reliably are recomputed in `f64` and counted
+- [x] **No panics in library code.** No `unwrap`/`expect` outside tests; lock poisoning is recovered, allocation failure is `Error::OutputTooLarge`, and `#![forbid(unsafe_code)]`
+- [x] **Numerical tolerance contract.** `|v − exact| ≤ bound · range · Λ(t) + ε·|exact|`, with Λ the window's Lebesgue function and `bound` 1e-13 (`f64`, CPU and GPU) / 1e-5 (GPU `f32`), for every method, inside the data and out. Published in the crate docs and enforced by `tests/contract.rs` against an exact 60-digit reference that computes Λ, on randomised, dense-burst and geometric-gap series and a two-million-knot series. Non-finite results are `Error::NonFiniteResult`, never values
+- [x] **Exact time.** Every time difference is taken in integer nanoseconds (96-bit integer arithmetic on the GPU, immune to fast-math compilers), on the POSIX scale — leap seconds fold forward — so accuracy doesn't depend on the series' length or spacing
+- [x] **Extrapolation semantics documented and tested** for every method, including `bounds_factor` and the 1- and 2-point cases (`Spline` docs, `tests/api.rs`)
+- [x] **Fallback transparency.** `Interpolation::spline()` reports the method actually used; `Interpolator::exact(true)` refuses to step down. The silent size-based downgrades (cubic → linear above 5,000 points) are gone
 
 ### API
 
-- [ ] **Typed errors.** 51 public functions return `anyhow::Result`; a library should return `splimes::Error` so callers can match on failures. `anyhow` leaves the public API
-- [ ] **Public surface reviewed and trimmed.** `pub mod helpers` exposes internals (batch state, target-time iterator); `apply_fast_path`, `BASE_BATCH_SIZE`, `POINT_SIZE` and the `SECONDS_IN_*` constants need a keep/hide decision. Everything kept is documented: 64 public items lack docs today, and `#![warn(missing_docs)]` becomes a gate
-- [ ] **Provenance labels.** Return whether each output point is raw, interpolated or extrapolated. WeftDB does this today in its server layer; it belongs here, beside the code that knows
-- [ ] **Async story.** Decide whether the API stays `async` (and tied to `tokio`) or offers a synchronous core with an async wrapper; the GPU path currently spins up its own runtime on a helper thread
-- [ ] **`GpuConfig::max_command_batch_size`** is reserved and has no effect. Implement it (see command batching below) or remove it before the freeze
-- [ ] **`cargo-semver-checks` in CI** from the first 0.x release, so accidental breakage is caught
+- [x] **Typed errors.** `splimes::Error` (`#[non_exhaustive]`); `anyhow` is no longer a dependency
+- [x] **Public surface reviewed and trimmed.** `helpers`, `apply_fast_path`, `BASE_BATCH_SIZE`, `POINT_SIZE` and the time constants are gone; `#![warn(missing_docs)]` is gated by CI's `-D warnings`
+- [x] **Provenance labels.** `PointKind::{Raw, Interpolated, Extrapolated}` per output point; raw points return the input value exactly
+- [x] **Async story.** A synchronous core, with `run_async` / `run_f64_async` on tokio's blocking pool behind the optional `tokio` feature. tokio is no longer a required dependency
+- [x] **`GpuConfig::max_command_batch_size`** removed (see command batching below)
+- [x] **`cargo-semver-checks` in CI**, against the latest crates.io release
 
 ### Performance (each claim backed by a published benchmark)
 
-- [ ] **Command batching**: submit many small batches per queue submission
-- [ ] **True async GPU handles**: today `GpuInterpolationResult` computes synchronously
-- [ ] **CPU/GPU overlap**: chunked upload → kernel → streamed readback
-- [ ] **Hardware auto-tuning**: calibrate the CPU/GPU break-even point per machine instead of fixed thresholds in `should_use_gpu`
-- [ ] **`BigDecimal` conversion cost** measured on the hot path; typed `f64` input as an option when the caller doesn't need decimal precision
-- [ ] **GPU memory stability**: buffer-pool behaviour under repeated calls and mixed batch sizes
-- [ ] Benchmarks published with hardware, versions and reproduction steps
+- [x] ~~**Command batching**~~ *Dropped.* A call is one dispatch per chunk of up to 16 Mi points, not many small submissions, so there is nothing to batch; the measured cost is output assembly, not submission (BENCHMARKS.md)
+- [x] ~~**True async GPU handles**~~ *Dropped* with the synchronous core: async callers use `run_async`
+- [x] **CPU/GPU overlap**: two chunks in flight, reading back one while the next computes
+- [x] **Hardware auto-tuning**: `calibrate()` measures the CPU, rayon and GPU crossovers and sets `AutoThresholds`; `set_auto_thresholds` overrides them
+- [x] **`BigDecimal` conversion cost** measured (about 3–4× an `f64` call, BENCHMARKS.md) and cut by more than half; typed `f64` input and output with `run_f64`
+- [x] **GPU memory stability**: a bounded buffer pool, and at most two buffer sets per call however long the grid; `tests/gpu.rs` checks both
+- [x] Benchmarks published with hardware, versions and reproduction steps (BENCHMARKS.md)
 
 ### Portability
 
-- [ ] **Conformance matrix**: NVIDIA / AMD / Intel / Apple / software adapters × f64 / f32, with measured numerical drift
-- [ ] **Real-GPU CI**: today CI covers lavapipe (Vulkan, f64) and WARP (D3D12, f32); add Metal and at least one hardware runner
+- [ ] **Conformance matrix**: measured on NVIDIA (f64 and f32) and the CPU; CI measures lavapipe (f64) on every run, and WARP and Metal (f32) when the runners expose them. **Still missing: AMD, Intel and Apple hardware**
+- [ ] **Real-GPU CI**: needs a self-hosted or GPU runner; CI covers software adapters only
 
 ### Release engineering
 
-- [x] CI, cargo-deny, MSRV check
+- [x] CI, cargo-deny, MSRV check, minimal-versions check of the dependency floors
 - [x] CHANGELOG (Keep a Changelog) and SECURITY.md
-- [ ] MSRV policy written down (bumps are minor-version changes before 1.0, breaking after)
-- [ ] Release automation (tag → `cargo publish`), mirroring WeftDB's
+- [x] MSRV policy written down: raising it is a minor-version change, only to a toolchain at least six months old (README, crate docs)
+- [x] Release automation: a `vX.Y.Z` tag runs CI, checks the tag against `Cargo.toml` and the changelog, publishes to crates.io with trusted publishing, and creates the GitHub release
+- [x] **Adversarial review.** Two multi-agent review passes (six dimensions, each finding checked by three independent skeptics, then a per-fix verification and regression hunt) confirmed and fixed 33 distinct defects (and a dozen smaller residuals), from silent wrong values and process crashes to test gaps; each fix's regression test is in the suite
+- [ ] Merge `release/1.0`
+- [ ] Configure crates.io trusted publishing for `release.yml` (one-time, on crates.io)
+- [ ] Date the 1.0.0 changelog entry and push the `v1.0.0` tag
+- [ ] Switch WeftDB to `splimes = "1"` ([MIGRATING.md](MIGRATING.md))
 
 ---
 
@@ -77,4 +84,6 @@ splimes ships 1.0 when every box below is ticked.
 
 - [ ] More methods: Akima and monotone (PCHIP) splines, which avoid cubic overshoot on step-like data
 - [ ] Multi-GPU *(only once single-GPU wins are proven)*
+- [ ] Faster exact time differences: an `i64` fast path for series spanning under 292 years, which is nearly all of them (single-threaded degree 8 is about 2× linear today)
+- [ ] Parallel input preparation for million-point inputs (sorting and de-duplicating is single-threaded)
 - [ ] Downsampling and aggregation stay in WeftDB (`weft-reduce`) unless another consumer asks for them here
