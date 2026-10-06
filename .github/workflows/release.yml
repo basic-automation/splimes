@@ -1,0 +1,68 @@
+name: Release
+
+# Pushing a tag `vX.Y.Z` publishes that version to crates.io and creates the GitHub
+# release, once the full CI suite passes on the tagged commit.
+#
+# Publishing uses crates.io trusted publishing (OIDC), so no API token is stored in the
+# repository. One-time setup on crates.io: splimes → Settings → Trusted Publishing →
+# add GitHub, repository `basic-automation/splimes`, workflow `release.yml`,
+# environment `release`.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: publish ${{ github.ref_name }}
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # crates.io trusted publishing
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Tag matches Cargo.toml
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "splimes") | .version')
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+            exit 1
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Changelog has a dated entry
+        run: |
+          if ! grep -qE "^## \[${VERSION}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no dated '## [${VERSION}] - YYYY-MM-DD' heading"
+            exit 1
+          fi
+          # The section body, up to the next version heading, becomes the release notes.
+          # Written outside the checkout: a stray file in it makes `cargo publish` refuse
+          # the dirty tree.
+          awk -v v="${VERSION}" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > "${RUNNER_TEMP}/release-notes.md"
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes-file "${RUNNER_TEMP}/release-notes.md" --verify-tag

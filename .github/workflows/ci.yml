@@ -8,6 +8,8 @@ on:
     # Nightly: catches new advisories and upstream breakage between pushes.
     - cron: "0 7 * * *"
   workflow_dispatch:
+  # The release workflow runs this whole suite before publishing.
+  workflow_call:
 
 permissions:
   contents: read
@@ -33,21 +35,21 @@ jobs:
           components: rustfmt
       - run: cargo +nightly fmt --all -- --check
 
+  # The crate enables clippy::pedantic and clippy::nursery; every lint is a failure here.
   clippy:
-    name: clippy
+    name: clippy (${{ matrix.features }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["--all-features", "--no-default-features", "--no-default-features --features tokio"]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Gated on the categories that catch defects; the pedantic/nursery backlog is
-      # reported locally, not enforced. RUSTFLAGS is cleared so the workflow-level
-      # `-D warnings` doesn't turn this into "deny every clippy lint".
-      - run: cargo clippy --all-targets --all-features --locked -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
-        env:
-          RUSTFLAGS: ""
+      - run: cargo clippy --all-targets ${{ matrix.features }} --locked -- -D warnings
 
   msrv:
     name: msrv (1.95)
@@ -57,6 +59,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --all-features --locked
+      - run: cargo check --lib --no-default-features --locked
 
   # Early warning only: upstream crates can break on nightly; never blocks a merge.
   nightly:
@@ -81,10 +84,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-      # Linux runners have no GPU. Mesa's lavapipe is a software Vulkan driver (with f64),
-      # so the wgpu / WGSL path really runs, and SPLIMES_REQUIRE_GPU makes a missing adapter
-      # a failure rather than a silent skip. Windows runners expose WARP (software D3D12,
-      # no f64), which exercises the f32 shader path.
+      # Linux runners have no GPU. Mesa's lavapipe is a software Vulkan driver with f64,
+      # so the wgpu kernels really run, and SPLIMES_REQUIRE_GPU makes a missing adapter a
+      # failure rather than a silent skip. Windows runners expose WARP (software D3D12,
+      # no f64), which exercises the f32 kernel. macOS runners may expose Metal (f32 only);
+      # the GPU tests run there when they do and skip with a notice when they don't.
       - name: Install software Vulkan (lavapipe)
         if: runner.os == 'Linux'
         run: |
@@ -92,18 +96,55 @@ jobs:
           sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 vulkan-tools
           vulkaninfo --summary || true
           echo "SPLIMES_REQUIRE_GPU=1" >> "$GITHUB_ENV"
+          echo "SPLIMES_REQUIRE_GPU_F64=1" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features --locked
+      # The measured error of every backend on this runner's adapter, for the
+      # conformance matrix in BENCHMARKS.md. The same bounds are asserted above.
+      - name: Numerical conformance report
+        run: cargo test --release --all-features --locked --test contract -- --nocapture --test-threads 1
+
+  test-minimal:
+    name: test (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --no-default-features --locked
+      - run: cargo test --no-default-features --features tokio --locked
+
+  # The dependency floors in Cargo.toml are real: build and test against the oldest
+  # versions they allow.
+  minimal-versions:
+    name: minimal versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +nightly update -Z direct-minimal-versions
+      - run: cargo +nightly test --all-features --lib --test api
+        env:
+          RUSTFLAGS: ""
+      - run: cargo +nightly check --lib --no-default-features
+        env:
+          RUSTFLAGS: ""
 
   docs:
     name: rustdoc
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --no-deps --all-features --locked
+      # As docs.rs builds it: nightly, all features, `--cfg docsrs` for feature badges.
+      - run: cargo +nightly doc --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: -D warnings --cfg docsrs
+      # And as a user with default features builds it: no links into feature-gated items.
+      - run: cargo doc --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -116,6 +157,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo package --locked
+      - name: Packaged files
+        run: cargo package --list --locked
+      # What the release job runs, minus the upload: catches anything that would make
+      # `cargo publish` refuse the tree.
+      - run: cargo publish --dry-run --locked
+
+  # Fails if the public API breaks semver relative to the latest release on crates.io:
+  # a breaking change needs a major version bump.
+  semver:
+    name: cargo-semver-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
 
   deny:
     name: cargo-deny
