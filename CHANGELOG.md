@@ -4,9 +4,141 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-While the project is pre-1.0, minor version bumps may contain breaking changes.
+From 1.0, what each interpolation method computes (beyond rounding within the
+published error bound) is covered by semver, as is the public API. Raising the minimum
+supported Rust version is a minor-version change.
 
 ## [Unreleased]
+
+## [1.0.0] - Unreleased
+
+A rewrite of the engine around one precisely defined kernel that every backend
+computes. It is a breaking release: [MIGRATING.md](MIGRATING.md) maps the 0.1 API to
+its replacement and lists the results that change.
+
+### Added
+
+- `Interpolator`, a `Copy` builder: method, resolution, `backend(Backend)`,
+  `gpu_precision(Precision)` and `exact(bool)`, run with `run(&[Point], start, end)`
+  or `run_f64(&[DateTime<Utc>], &[f64], start, end)`.
+- `Interpolation<V>`: the series as timestamp, value and `PointKind` columns, plus a
+  report of the method actually used (`spline()`, `requested_spline()`), the backend
+  (`backend()`), the precision (`precision()`) and why the GPU was abandoned, if it
+  was (`gpu_fallback()`).
+- **Provenance:** every output point is `PointKind::Raw` (it coincides with an input,
+  and returns that input's value exactly), `Interpolated` or `Extrapolated`.
+- **Typed `f64` input and output** with `Interpolator::run_f64`, skipping `BigDecimal`
+  conversion entirely.
+- **Numerical contract:** every result is within `bound · range · Λ(t)` of the exact
+  value (Λ the window's Lebesgue function), with `bound` 1e-13 in `f64` and 1e-5 in GPU
+  `f32`, for every method, inside the data and out. Enforced by `tests/contract.rs`
+  against an exact 60-digit reference that computes Λ, on randomised and stress series.
+- `Interpolation::points_recomputed_in_f64`: how many points the GPU couldn't compute
+  reliably (`f32` overflow, or `f32` windows mixing dense and sparse knots) and were
+  recomputed in `f64` on the CPU.
+- `splimes::Error`, a `#[non_exhaustive]` enum, and `splimes::Result`.
+- `Backend::Auto` falls back to the CPU when the GPU fails mid-call, logs why, and
+  reports it. It never starts the GPU itself: it uses it once the program has (with
+  `prewarm_gpu`, `calibrate` or a `Backend::Gpu` call), so no driver ever initialises on
+  a thread the process can't wait for at exit.
+- `calibrate()`, `auto_thresholds()` and `set_auto_thresholds()`: measure this
+  machine's CPU and GPU crossovers, in both GPU precisions, instead of trusting fixed
+  thresholds. `AutoThresholds` has a GPU threshold per precision.
+- `Precision::F32` for the GPU, using split (hi/lo) `f32` times so long series keep
+  their resolution in single precision. Points where the `f32` kernel overflows but
+  `f64` wouldn't are recomputed in `f64` on the CPU.
+- `Interpolator::max_points`, to refuse oversized grids from untrusted input before
+  allocating.
+- `gpu_info()`, `gpu_config()`, `gpu_pool_stats()`, `configure_gpu()`.
+- Features: `gpu` (default; turn it off to drop wgpu), `serde` (default), and
+  `tokio` (`Interpolator::run_async`, `run_f64_async`).
+- `Resolution::ALL`, `Resolution::step_nanos`, `Resolution::as_str`,
+  `Spline::min_points`, `Spline::validate`, `Spline::fallback_for`,
+  `PointKind::as_str`, `MAX_POLYNOMIAL_DEGREE`.
+- `BENCHMARKS.md`, with hardware, versions and reproduction steps.
+
+### Changed
+
+- **All entry points are synchronous.** The 0.1 `async fn`s did all their work
+  without yielding, blocking the executor; use `run_async` (feature `tokio`) or your
+  runtime's `spawn_blocking` from async code. tokio is no longer a dependency.
+- **One kernel, every backend.** Quadratic, cubic and polynomial windows, and
+  extrapolation, are defined once (see `Spline`) and computed identically on CPU and
+  GPU; `Cpu` and `Parallel` are bit-identical.
+- **Time is exact, and never truncated to the resolution.** 0.1's CPU paths measured
+  knot spacing in whole resolution units, so hourly output from sub-hour data saw
+  coincident knots. All paths now take every time difference exactly, in integer
+  nanoseconds (exact hi/lo pairs on the GPU), so accuracy doesn't degrade with the
+  length of the series.
+- **Time is on the POSIX scale.** A leap second (`23:59:60.x`, which chrono can
+  represent) is the same instant as `00:00:00.x` the next second, for inputs, `start`
+  and `end`; output timestamps never contain one. 0.1 mixed chrono's subtraction (which
+  counts leap seconds) with its addition (which doesn't).
+- **No silent method downgrades.** 0.1 replaced cubic with quadratic from 2,500
+  points and with linear from 5,000, and capped polynomial degree at 8, without
+  saying so. Now the method you ask for runs, `Polynomial` degrees above 8 are an
+  error, and stepping down for too few points is reported (or refused with
+  `exact(true)`).
+- **Polynomial falls back within its family:** `Polynomial(d, b)` with `n ≤ d` points
+  runs `Polynomial(n − 1, b)`, keeping its extrapolation and bounds, instead of
+  becoming `Cubic`.
+- Input is taken by shared reference and no longer sorted in place.
+- Duplicate timestamps keep the last value, on every method. Every input value must be
+  finite, including ones a later duplicate replaces.
+- `GpuConfig` presets are `const fn` as before, but describe the new buffer pool:
+  `high_performance()` keeps 1 GiB + 1 MiB, enough for both of a call's 16 Mi-point
+  `f64` buffer sets. A GPU call holds at most two chunks' buffers at a time.
+- `start == end` is a one-point grid instead of an error.
+- `BigDecimal` results are the shortest decimal that round-trips to the computed
+  `f64`, not its full binary expansion or a 10-place rounding.
+- `Resolution` and `Spline` are `#[non_exhaustive]`; `Spline` parsing is
+  case-insensitive for the unit variants and validates parameters.
+- The GPU device is opened with `pollster` on the calling thread instead of a
+  private tokio runtime on a helper thread.
+
+### Fixed
+
+- `Debug` for `Point` wrote the value's plain expansion, so a value like
+  `1e-10000000000` (a 15-byte JSON string) allocated gigabytes or aborted. It now
+  prints in space proportional to the digits.
+
+- GPU validation, out-of-memory and internal errors panicked (wgpu's default with no
+  handler). They are captured in error scopes and returned as `Error::Gpu`; a lost
+  device is detected and reported as `Error::GpuUnavailable`.
+- The f32 GPU kernels computed in raw nanoseconds, so cubic Lagrange products
+  overflowed `f32` for knot spacings of a couple of hours and beyond, and the f32
+  linear kernel clamped every result to ±10⁶.
+- The f64 GPU path measured target times from the first *unsorted* input point, so
+  unsorted input came out shifted in time.
+- The GPU cubic and polynomial kernels added a chunk offset to their thread index
+  while binding a per-chunk buffer, so grids larger than one chunk lost points in every
+  chunk after the first.
+- Non-finite results were silently returned as zero; they are now
+  `Error::NonFiniteResult`.
+- `BigDecimal` inputs near `f64::MAX` failed conversion.
+- Grids too large to allocate aborted the process; they are now
+  `Error::OutputTooLarge`.
+- Spilling large results to temporary files (and back through a lossy text format)
+  is gone, along with the `tempfile` and `sysinfo` dependencies.
+
+### Removed
+
+- `auto_interpolate`, `cpu_interpolate`, `parallel_interpolate`, `gpu_interpolate`:
+  use `interpolate` or an `Interpolator` with a `Backend`.
+- `pub mod helpers` and its contents (`should_use_gpu`, `InterpolationStrategy`,
+  `estimate_output_points`, `generate_target_times`, `TargetTimesIterator`, batch
+  state), `apply_fast_path`, `BASE_BATCH_SIZE`, `POINT_SIZE`, and the
+  `SECONDS_IN_*` / `DAYS_IN_*` constants.
+- `Resolution::to_step`, `to_base`, `to_step_base`, `difference` and `round`
+  (`round` was the identity for every resolution); use `step` and `step_nanos`.
+- `Spline::number_of_points_required` (now `min_points`) and `Spline::pre_check`.
+- `effective_gpu_config`, `gpu_config_applied`, `gpu_buffer_pool_stats`,
+  `BufferPoolStats` and the `GpuConfig` fields `buffer_pool`, `num_staging_buffers`
+  and the never-implemented `max_command_batch_size`.
+- The `gpu-eager-init` feature (a `ctor` running GPU start-up before `main`); call
+  `prewarm_gpu()` at startup instead.
+- Dependencies: `anyhow`, `tokio` (now optional), `sysinfo`, `tempfile`, `wide`,
+  `ctor`.
 
 ## [0.1.0] - 2026-10-05
 
@@ -38,5 +170,6 @@ that history.
 
 - `Point::random` is now test-only, and `fake` is no longer a runtime dependency.
 
-[Unreleased]: https://github.com/basic-automation/splimes/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/basic-automation/splimes/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/basic-automation/splimes/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/basic-automation/splimes/releases/tag/v0.1.0

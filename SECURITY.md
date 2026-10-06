@@ -2,12 +2,13 @@
 
 ## Supported versions
 
-splimes is pre-1.0. Only the latest published `0.x` release receives fixes.
+The latest 1.x release receives fixes. 0.1 was a pre-release and is not supported;
+see [MIGRATING.md](MIGRATING.md) to upgrade.
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | yes       |
-| < 0.1   | no        |
+| 1.x     | yes       |
+| 0.1.x   | no        |
 
 ## Reporting a vulnerability
 
@@ -29,5 +30,6 @@ caller-supplied points, time ranges or resolutions; wrong results returned witho
 error (silent precision loss, mislabelled extrapolation); and GPU-path behaviour that
 can crash the host process.
 
-Known and tracked on the [roadmap](ROADMAP.md), so not needed as reports: GPU errors
-currently panic instead of falling back to CPU, and some library paths still `unwrap`.
+A result outside the published numerical contract (the error bounds in the crate
+documentation) is a correctness bug: report it as a normal issue, with the input that
+reproduces it.
