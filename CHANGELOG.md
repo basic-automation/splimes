@@ -10,7 +10,7 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-10-05
 
 A rewrite of the engine around one precisely defined kernel that every backend
 computes. It is a breaking release: [MIGRATING.md](MIGRATING.md) maps the 0.1 API to
