@@ -90,4 +90,5 @@ the published crate and is in progress.
 - [ ] Multi-GPU *(only once single-GPU wins are proven)*
 - [ ] Faster exact time differences: an `i64` fast path for series spanning under 292 years, which is nearly all of them (single-threaded degree 8 is about 2× linear today)
 - [ ] Parallel input preparation for million-point inputs (sorting and de-duplicating is single-threaded)
+- [ ] Runtime-agnostic async: a future any executor can await (async-std, smol, `futures`), not just tokio. Spawn `run` on rayon's pool and complete a oneshot future built on `std` (`Mutex` and `Waker`), so it adds no dependency and needs no feature flag. It needs a new name (`run_async` is the tokio wrapper's). Additive, so a 1.x minor release; the tokio wrappers stay
 - [ ] Downsampling and aggregation stay in WeftDB (`weft-reduce`) unless another consumer asks for them here
