@@ -23,7 +23,7 @@ over `BigDecimal` values.
 - [x] README example compiled and run as a doctest; the previously `ignore`d API examples are compile-checked (one was broken)
 - [x] CI: rustfmt, clippy (defect categories), MSRV, tests on Linux (lavapipe, GPU required) / macOS / Windows (WARP, the f32 path), rustdoc, `cargo package`, cargo-deny
 - [x] Published 0.1.0 to crates.io (2026-10-05)
-- [ ] Switch WeftDB from the in-tree copy to `splimes = "0.1"`
+- [x] ~~Switch WeftDB from the in-tree copy to `splimes = "0.1"`~~ *Superseded* by the switch to `splimes = "1"` (below)
 
 ---
 
@@ -32,6 +32,10 @@ over `BigDecimal` values.
 1.0 is a semver promise: the public API, the numerical behaviour, and the MSRV policy.
 splimes ships 1.0 when every box below is ticked, or the item is explicitly dropped or
 deferred with a reason.
+
+**Shipped as 1.0.0 on 2026-10-05.** Three items are deferred past 1.0: two portability
+items, which need hardware the project doesn't have, and WeftDB's switch, which needed
+the published crate and is in progress.
 
 ### Correctness
 
@@ -63,8 +67,8 @@ deferred with a reason.
 
 ### Portability
 
-- [ ] **Conformance matrix**: measured on NVIDIA (f64 and f32) and the CPU; CI measures lavapipe (f64) on every run, and WARP and Metal (f32) when the runners expose them. **Still missing: AMD, Intel and Apple hardware**
-- [ ] **Real-GPU CI**: needs a self-hosted or GPU runner; CI covers software adapters only
+- [ ] **Conformance matrix** *(deferred past 1.0: needs the hardware)*: measured on NVIDIA (f64 and f32) and the CPU. CI measures lavapipe (f64 and f32) on every run, and WARP and Metal (f32) when the runners expose them, as they did for 1.0.0. The macOS runner's Metal device gave the first Apple result: worst 3.1e-7 on the conformance matrix, against the 1e-5 bound (BENCHMARKS.md). **Still missing: AMD and Intel GPUs, and Apple silicon outside a virtual machine**
+- [ ] **Real-GPU CI** *(deferred past 1.0)*: needs a self-hosted or GPU runner; CI covers software and virtualised adapters only
 
 ### Release engineering
 
@@ -73,17 +77,19 @@ deferred with a reason.
 - [x] MSRV policy written down: raising it is a minor-version change, only to a toolchain at least six months old (README, crate docs)
 - [x] Release automation: a `vX.Y.Z` tag runs CI, checks the tag against `Cargo.toml` and the changelog, publishes to crates.io with trusted publishing, and creates the GitHub release
 - [x] **Adversarial review.** Two multi-agent review passes (six dimensions, each finding checked by three independent skeptics, then a per-fix verification and regression hunt) confirmed and fixed 33 distinct defects (and a dozen smaller residuals), from silent wrong values and process crashes to test gaps; each fix's regression test is in the suite
-- [ ] Merge `release/1.0`
-- [ ] Configure crates.io trusted publishing for `release.yml` (one-time, on crates.io)
-- [ ] Date the 1.0.0 changelog entry and push the `v1.0.0` tag
-- [ ] Switch WeftDB to `splimes = "1"` ([MIGRATING.md](MIGRATING.md))
+- [x] Merged `release/1.0` ([#1](https://github.com/basic-automation/splimes/pull/1))
+- [x] crates.io trusted publishing for `release.yml`, the only way to publish: the crate refuses new versions published with an API token, and the GitHub `release` environment deploys only from `v*` tags
+- [x] Published 1.0.0 to crates.io from the `v1.0.0` tag (2026-10-05)
+- [ ] Switch WeftDB to `splimes = "1"` ([MIGRATING.md](MIGRATING.md)) *(deferred past 1.0: it needs the published crate; in progress)*
 
 ---
 
 ## Later / not before 1.0
 
 - [ ] More methods: Akima and monotone (PCHIP) splines, which avoid cubic overshoot on step-like data
+- [ ] Raise `MAX_POLYNOMIAL_DEGREE` above 8. Allowing more is additive, so it can ship in a 1.x minor release. The cap is about usefulness: noise amplification on evenly spaced knots is about 11× at degree 8, 30× at 10 and 500× at 15, and worse on irregular spacing. Constants derived for degree 8 also limit it: `F32_GAP_RATIO` (1024⁸ = 2⁸⁰ inside `f32`; degree 12 reaches 2¹²⁰), `SCALE_FROM` (256⁸ = 2⁶⁴; degree 16 overflows `f32`), and `MAX_WINDOW`, which sizes the CPU and WGSL stack arrays for every method. Before raising it: derive those bounds per window instead of fixing them, measure the cost of larger windows to linear and cubic and GPU register use, and extend `tests/contract.rs` to the new maximum. For high degree, a global Chebyshev or barycentric fit may be the better method
 - [ ] Multi-GPU *(only once single-GPU wins are proven)*
 - [ ] Faster exact time differences: an `i64` fast path for series spanning under 292 years, which is nearly all of them (single-threaded degree 8 is about 2× linear today)
 - [ ] Parallel input preparation for million-point inputs (sorting and de-duplicating is single-threaded)
+- [ ] Runtime-agnostic async: a future any executor can await (async-std, smol, `futures`), not just tokio. Spawn `run` on rayon's pool and complete a oneshot future built on `std` (`Mutex` and `Waker`), so it adds no dependency and needs no feature flag. It needs a new name (`run_async` is the tokio wrapper's). Additive, so a 1.x minor release; the tokio wrappers stay
 - [ ] Downsampling and aggregation stay in WeftDB (`weft-reduce`) unless another consumer asks for them here

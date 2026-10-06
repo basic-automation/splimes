@@ -142,8 +142,9 @@ contract"). 258 series — 256 randomised (knot spacings from microseconds to 30
 regular and irregular, values tiny, huge and large-offset), a dense burst at the end of a
 sparse series, and geometric gaps — each on five grids: across both edges (two edge
 spacings out), the middle, the densest stretch, and 100 edge spacings out. CI prints the
-same table for lavapipe (software Vulkan, f64) on every run, and for the Windows and
-macOS runners' adapters (WARP and Metal, f32) when those runners expose one.
+same report on every run: for lavapipe (f64 and f32), which the Linux job requires, and
+for the Windows and macOS runners' adapters (WARP and Metal, f32) when they expose one.
+The 1.0.0 release run's results are [below](#ci-runners).
 
 **CPU** (`Cpu` and `Parallel`) and **NVIDIA RTX 4070 Ti SUPER, f64**:
 
@@ -167,11 +168,37 @@ inputs inherits it. Λ is the honest yardstick.) The two-million-knot series is 
 
 | Method | Inside | Outside | Published bound |
 |--------|-------:|--------:|------:|
-| `Linear` | 1.4e-7 | 1.5e-7 | 1e-5 |
-| `Quadratic` | 1.4e-7 | 1.2e-7 | 1e-5 |
-| `Cubic` | 1.8e-7 | 9.1e-8 | 1e-5 |
-| `Polynomial(4, 0.5)` | 1.9e-7 | 1.2e-7 | 1e-5 |
-| `Polynomial(5, None)` | 1.8e-7 | 1.3e-7 | 1e-5 |
-| `Polynomial(8, None)` | 1.9e-7 | 1.3e-7 | 1e-5 |
+| `Linear` | 1.4e-7 | 2.0e-7 | 1e-5 |
+| `Quadratic` | 1.4e-7 | 1.9e-7 | 1e-5 |
+| `Cubic` | 1.9e-7 | 1.9e-7 | 1e-5 |
+| `Polynomial(4, 0.5)` | 2.0e-7 | 1.9e-7 | 1e-5 |
+| `Polynomial(5, None)` | 2.3e-7 | 1.9e-7 | 1e-5 |
+| `Polynomial(8, None)` | 3.0e-7 | 1.9e-7 | 1e-5 |
 
-The matrix still lacks AMD, Intel and Apple hardware; see the roadmap.
+The two-million-knot series is within 5.7e-8 (linear) to 5.1e-7 (degree 5) in f32.
+
+### CI runners
+
+From the `v1.0.0` release run, on GitHub's hosted runners. These are software and
+virtualised adapters, not GPUs you would deploy on, but they run each platform's own
+shader compiler: Metal, for one, compiles shaders with fast math, which is what 1.0's
+integer time representation defends against. Of the three, only lavapipe has f64;
+its f64 table matches the CPU table above digit for digit.
+
+| Method | Metal inside | Metal outside | lavapipe inside | lavapipe outside | WARP inside | WARP outside | Published bound |
+|--------|------:|------:|------:|------:|------:|------:|------:|
+| `Linear` | 1.5e-7 | 2.0e-7 | 1.3e-7 | 2.6e-7 | 1.3e-7 | 2.6e-7 | 1e-5 |
+| `Quadratic` | 1.4e-7 | 1.9e-7 | 1.4e-7 | 1.9e-7 | 1.5e-7 | 1.9e-7 | 1e-5 |
+| `Cubic` | 2.1e-7 | 1.9e-7 | 1.9e-7 | 1.9e-7 | 1.9e-7 | 1.9e-7 | 1e-5 |
+| `Polynomial(4, 0.5)` | 2.0e-7 | 1.9e-7 | 2.0e-7 | 1.9e-7 | 2.0e-7 | 1.9e-7 | 1e-5 |
+| `Polynomial(5, None)` | 2.0e-7 | 1.9e-7 | 2.3e-7 | 1.9e-7 | 2.3e-7 | 1.9e-7 | 1e-5 |
+| `Polynomial(8, None)` | 3.1e-7 | 1.9e-7 | 3.0e-7 | 1.9e-7 | 3.0e-7 | 1.9e-7 | 1e-5 |
+
+f32 throughout. The two-million-knot series is within 5.7e-8 (linear) to 5.1e-7
+(degree 5) on all three (4.9e-7 on Metal). The adapters, as wgpu reports them: **Metal**
+is the Apple Paravirtual device, the virtualised GPU of the `macos-latest` runner;
+**lavapipe** is llvmpipe (LLVM 20.1.2, 256 bits), Vulkan, on `ubuntu-latest`; **WARP** is
+the Microsoft Basic Render Driver, DX12, on `windows-latest`.
+
+The matrix still lacks AMD and Intel GPUs, and Apple silicon outside a virtual machine;
+see the roadmap.
