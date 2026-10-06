@@ -10,87 +10,136 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-Spline interpolation over **irregularly sampled** time series.
+Resample **irregularly sampled** time series onto a regular grid.
 
-`splimes` reconstructs a continuous signal from points that didn't arrive on a clean
-grid, and resamples it onto the regular grid you ask for: every second, minute, day,
-and so on.
+You have points that arrived whenever they arrived; you want a value every second,
+minute or day. `splimes` fits a local spline through the points, evaluates it on the
+grid, and labels every output point as an observation, an interpolation or an
+extrapolation.
 
-- **Methods:** linear, quadratic, cubic and polynomial splines. If there are too few
-  points for the method you asked for, it steps down to one that fits: cubic →
-  quadratic → linear.
-- **Backends:** SIMD and `rayon`-parallel CPU, or GPU via [`wgpu`](https://wgpu.rs)
-  (Vulkan / Metal / DX12). Selection is automatic. Without a usable GPU the engine
-  runs on the CPU, and small workloads stay on the CPU because dispatch overhead
-  would dominate.
-- **Values are [`BigDecimal`](https://docs.rs/bigdecimal):** precision is declared,
-  not quietly lost. GPUs without f64 support use an f32 path.
+- **Methods:** linear, quadratic, cubic and polynomial (degree 1 to 8). Each is
+  precisely defined, inside the data and outside it, and every backend computes the
+  same thing.
+- **Backends:** one CPU thread, rayon's thread pool, or the GPU via
+  [`wgpu`](https://wgpu.rs) (Vulkan, Metal, DX12), picked per call by size or chosen
+  explicitly. A GPU failure never panics: automatic selection reruns on the CPU and
+  tells you why.
+- **Values:** `BigDecimal` or `f64`. Computation is in `f64` (or `f32` on the GPU, if
+  you ask), against a published, tested error bound. Points that land on an input
+  return that input exactly, every digit intact.
+- **Provenance:** each output point is `Raw`, `Interpolated` or `Extrapolated`.
+- **Honest reporting:** the result says which method and backend actually ran. If
+  there are too few points for the method you asked for, it steps down (cubic →
+  quadratic → linear) and says so, or refuses if you'd rather it didn't.
 
 ## Quick start
 
 ```toml
 [dependencies]
-splimes = "0.1"
+splimes = "1"
 bigdecimal = "0.4"
 chrono = "0.4"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-anyhow = "1"
 ```
 
 ```rust
 use bigdecimal::BigDecimal;
 use chrono::{TimeZone, Utc};
-use splimes::{Point, Resolution, Spline, auto_interpolate};
+use splimes::{Point, PointKind, Resolution, Spline};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), splimes::Error> {
     let at = |secs: i64| Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap();
 
     // Four readings, unevenly spaced.
-    let mut readings = vec![
+    let readings = [
         Point::new(at(0), BigDecimal::from(10)),
         Point::new(at(7), BigDecimal::from(14)),
         Point::new(at(19), BigDecimal::from(11)),
         Point::new(at(30), BigDecimal::from(20)),
     ];
 
-    // Resample onto a one-second grid with a cubic spline.
-    let series = auto_interpolate(&mut readings, at(0), at(30), Resolution::Seconds, Spline::Cubic).await?;
+    // A value every second, with a cubic spline, a little past the last reading.
+    let series = splimes::interpolate(&readings, at(0), at(33), Resolution::Seconds, Spline::Cubic)?;
 
-    for point in series.iter().take(3) {
-        println!("{} {}", point.timestamp, point.value);
+    for (timestamp, value, kind) in series.iter().take(3) {
+        println!("{timestamp} {value} {kind}");
     }
+    assert_eq!(series.kinds()[7], PointKind::Raw);
+    assert_eq!(series.kinds()[32], PointKind::Extrapolated);
     Ok(())
 }
 ```
 
-`auto_interpolate` picks the backend for you. `cpu_interpolate`,
-`parallel_interpolate` and `gpu_interpolate` force a specific backend, and
-`prewarm_gpu` moves the GPU's one-time start-up cost (about a second) out of your
-first query.
+For more control, configure an `Interpolator`:
+
+```rust
+use chrono::{TimeDelta, TimeZone, Utc};
+use splimes::{Backend, Interpolator, Resolution, Spline};
+
+let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+let timestamps = [t0, t0 + TimeDelta::seconds(4), t0 + TimeDelta::seconds(9)];
+let values = [1.0, 3.5, 2.0];
+
+let series = Interpolator::new(Spline::Quadratic, Resolution::Milliseconds)
+    .backend(Backend::Parallel) // or Auto (the default), Cpu, Gpu
+    .exact(true)                // error instead of stepping down to a simpler method
+    .run_f64(&timestamps, &values, t0, t0 + TimeDelta::seconds(9))?; // f64 in, f64 out
+
+assert_eq!(series.len(), 9_001);
+assert_eq!(series.spline(), Spline::Quadratic);
+# Ok::<(), splimes::Error>(())
+```
+
+From async code, enable the `tokio` feature and call `run_async`, which runs the work
+on tokio's blocking pool.
+
+## Accuracy
+
+Every backend computes from the same normalised inputs, with every time difference
+taken exactly, and `tests/contract.rs` checks each one against an exact 60-digit
+reference. Each result is as accurate as perturbing every input value by **10⁻¹³** of
+the value range allows in `f64` (CPU or GPU), or **10⁻⁵** in GPU `f32` — for every
+method, inside the data and out, however long the series. Where the problem is
+ill-conditioned (very irregular spacing, high degree, far extrapolation) the error grows
+exactly as much as the method amplifies such a perturbation, and no more. The
+[crate documentation](https://docs.rs/splimes/latest/splimes/#numerical-contract)
+has the precise statement. It is part of the semver promise.
+
+## Performance
+
+On a 16-core Ryzen 9 7950X3D with an RTX 4070 Ti SUPER, a cubic resample of 4,096
+irregular points onto a 16.7-million-point grid takes about **100 ms** on rayon's pool,
+against 670 ms on one thread, and a million points about 7–12 ms. Building the output
+(timestamps, values, provenance) costs the same whichever backend computed the values,
+and it dominates, so the GPU gains little: here it at best ties rayon in `f64` and wins
+modestly in `f32` at a million points and more. `Backend::Auto` therefore uses the GPU
+only once `splimes::calibrate()` has started it and measured that it pays off on your
+machine. [BENCHMARKS.md](BENCHMARKS.md) has the numbers and how to reproduce them.
 
 ## Features
 
 | Feature | Default | Effect |
 |---------|---------|--------|
-| `gpu-eager-init` | off | Initialise the GPU at process start (via `ctor`) instead of on first use. Trades start-up time for a warm first query. Leave it off if you want to call `prewarm_gpu_with_config`. |
+| `gpu` | yes | The wgpu backend. Without it, `Backend::Gpu` returns `Error::GpuUnavailable`, and the build drops wgpu entirely. |
+| `serde` | yes | `Serialize`/`Deserialize` for `Point`, `PointKind`, `Resolution` and `Spline`. |
+| `tokio` | no | `Interpolator::run_async` and `run_f64_async`. |
 
-## Status
+## Stability
 
-**Pre-1.0.** The API may change between minor versions until 1.0; see
-[`ROADMAP.md`](ROADMAP.md) for what 1.0 requires and [`CHANGELOG.md`](CHANGELOG.md)
-for what changed. The minimum supported Rust version is **1.95**, and raising it
-counts as a breaking change after 1.0.
+`splimes` 1.x follows [semantic versioning](https://semver.org). Covered: the public
+API, what each method computes (beyond rounding within the published bound), and the
+serde formats. The minimum supported Rust version is **1.95**; raising it is a
+minor-version change, announced in the [changelog](CHANGELOG.md), and only to a
+version at least six months old. Upgrading from 0.1? See [MIGRATING.md](MIGRATING.md).
 
 `splimes` is the interpolation engine behind [WeftDB](https://github.com/basic-automation/weftdb),
 but it has no dependency on the database and works on its own.
 
 ## Contributing
 
-`cargo test` runs anywhere. Without a GPU, the tests that compare CPU and GPU output
-skip their GPU half; set `SPLIMES_REQUIRE_GPU=1` to make a missing GPU a failure instead
-(CI does, on a software Vulkan driver). Formatting uses nightly rustfmt:
-`cargo +nightly fmt`.
+`cargo test` runs anywhere. Without a GPU, the GPU tests skip themselves; set
+`SPLIMES_REQUIRE_GPU=1` to make a missing GPU a failure instead, or
+`SPLIMES_REQUIRE_GPU_F64=1` to require one with `f64` support too (CI sets that, on a
+software Vulkan driver). Formatting uses nightly rustfmt: `cargo +nightly fmt`.
 
 ## License
 

@@ -1,298 +1,171 @@
-// Proving `Send` through wgpu's nested buffer/device types exceeds the default limit of 128;
-// rustc warns that overflowing it will become a hard error.
+//! Resample irregularly sampled time series onto a regular grid.
+//!
+//! You have points that arrived whenever they arrived; you want a value every second,
+//! minute or day. splimes fits a local spline through the points and evaluates it on the
+//! grid, on the CPU (one thread or rayon's pool) or the GPU (wgpu), and tells you, for
+//! every output point, whether it is an observation, an interpolation or an extrapolation.
+//!
+//! ```
+//! use bigdecimal::BigDecimal;
+//! use chrono::{TimeZone, Utc};
+//! use splimes::{Point, PointKind, Resolution, Spline};
+//!
+//! let at = |secs: i64| Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap();
+//! let readings = [
+//!     Point::new(at(0), BigDecimal::from(10)),
+//!     Point::new(at(7), BigDecimal::from(14)),
+//!     Point::new(at(19), BigDecimal::from(11)),
+//!     Point::new(at(30), BigDecimal::from(20)),
+//! ];
+//!
+//! let series = splimes::interpolate(&readings, at(0), at(35), Resolution::Seconds, Spline::Cubic)?;
+//!
+//! assert_eq!(series.len(), 36);
+//! assert_eq!(series.values()[7], BigDecimal::from(14)); // an input, returned exactly
+//! assert_eq!(series.kinds()[7], PointKind::Raw);
+//! assert_eq!(series.kinds()[8], PointKind::Interpolated);
+//! assert_eq!(series.kinds()[33], PointKind::Extrapolated);
+//! # Ok::<(), splimes::Error>(())
+//! ```
+//!
+//! For more control — the backend, GPU precision, refusing to fall back to a simpler
+//! method — use an [`Interpolator`]. For `f64` data, [`Interpolator::run_f64`] skips the
+//! `BigDecimal` conversions.
+//!
+//! # The grid
+//!
+//! The output grid is `start, start + step, start + 2·step, …`, up to and including the
+//! last point not after `end`, where `step` is the [`Resolution`]. It is anchored at
+//! `start`, not aligned to the epoch. `start == end` gives a one-point grid; `start > end`
+//! is an error.
+//!
+//! # Methods
+//!
+//! [`Spline`] documents what each method computes, inside the data and outside it, and
+//! how it steps down when there are too few points. The method actually used is reported
+//! by [`Interpolation::spline`].
+//!
+//! # Input
+//!
+//! Points may arrive in any order. Points at the same instant collapse to the last one
+//! given. Values must be finite in `f64` (`BigDecimal`s beyond ±1.8 × 10³⁰⁸ are rejected,
+//! not saturated).
+//!
+//! Time is on the POSIX scale, exact to the nanosecond. chrono can represent a leap
+//! second (`23:59:60.x`); splimes treats it as the same instant as `00:00:00.x` the next
+//! second, for inputs, `start` and `end` alike, and never returns one.
+//!
+//! # Numerical contract
+//!
+//! Every backend computes the same formula from the same normalised inputs, taking every
+//! time difference exactly. `BigDecimal` inputs are first rounded to the nearest `f64`;
+//! the contract is about what happens after that. Write `exact` for the method evaluated
+//! in exact arithmetic on those rounded inputs, `range` for the spread of the input values
+//! (`max − min`), and `ε = 2⁻⁵²`. Then every value `v` satisfies
+//!
+//! `|v − exact| ≤ bound · range · Λ(t) + ε · |exact|`
+//!
+//! with `bound` = **1 × 10⁻¹³** in `f64` (`Cpu`, `Parallel`, `Gpu`) and **1 × 10⁻⁵** in
+//! `f32` (`Gpu` only), for every method, inside and outside the data. `ε · |exact|` is the
+//! rounding any `f64` of that magnitude carries.
+//!
+//! `Λ(t) = Σⱼ |Lⱼ(t)|` is the Lebesgue function of the window used at `t`: the sum of the
+//! magnitudes of its Lagrange basis polynomials, which is how much the method amplifies
+//! any perturbation of the input values. In other words, a result is as accurate as
+//! perturbing every input value by `bound · range` allows. `Λ` is exactly 1 for linear
+//! interpolation inside the data, close to 1 for evenly spread knots, and grows where the
+//! problem itself is ill-conditioned: with very irregular spacing (a burst of dense samples
+//! beside sparse ones, geometric gaps), with high degree, and outside the data, roughly
+//! like `(D / h)^degree` at a distance `D` from the edge window of spacing `h`.
+//! Extrapolating a high-degree polynomial far is numerically as well as statistically
+//! fragile, and the bound says by how much. `Cubic` holds the first or last input value
+//! outside the data, exactly.
+//!
+//! Beyond the bound:
+//!
+//! - `Cpu` and `Parallel` results are bit-identical, and `Gpu` `f64` results usually are too.
+//! - Points that coincide with an input ([`PointKind::Raw`]) are that input's value,
+//!   exactly, on every backend and precision.
+//! - `BigDecimal` results are the shortest decimal that round-trips to the computed `f64`.
+//! - Non-finite results are errors, never values: an extrapolation that overflows `f64`
+//!   returns [`Error::NonFiniteResult`].
+//! - On the GPU in `f32`, points it can't compute reliably — values that overflow, and
+//!   windows whose knot gaps differ from the mean spacing by more than 1,024× — are
+//!   recomputed in `f64` on the CPU and counted by
+//!   [`Interpolation::points_recomputed_in_f64`].
+//!
+//! `tests/contract.rs` checks every backend and precision against an exact 60-digit
+//! reference that also computes `Λ`: 258 series (256 randomised, with knot spacings from
+//! microseconds to 30 days, plus a dense-burst and a geometric-gap series), each on five
+//! grids — across both edges, the middle, the densest stretch, and 100 spacings out — for
+//! six methods, plus a two-million-knot series and far-out bounded extrapolation. It fails
+//! if a bound is exceeded.
+//!
+//! # Backends
+//!
+//! [`Backend::Auto`] (the default) picks by grid size; see [`AutoThresholds`]. It never
+//! starts the GPU: it uses it only once the program has, with [`prewarm_gpu`],
+//! [`calibrate`] or an explicit [`Backend::Gpu`] call, and only above the GPU thresholds,
+//! which by default are never (see `BENCHMARKS.md`). If the GPU fails mid-call, `Auto`
+//! reruns on the CPU and says so in [`Interpolation::gpu_fallback`]; an explicit
+//! [`Backend::Gpu`] returns the error. splimes never opens the device on a thread of its
+//! own: a process exiting while a driver initialises on another thread can crash.
+//!
+//! All entry points are synchronous and CPU- or GPU-bound. From async code, use the
+//! `tokio` feature's `Interpolator::run_async`, or your runtime's equivalent of
+//! `spawn_blocking`.
+//!
+//! # Features
+//!
+//! | Feature | Default | Effect |
+//! |---------|---------|--------|
+//! | `gpu` | yes | The wgpu backend. Without it, `Backend::Gpu` returns [`Error::GpuUnavailable`]. |
+//! | `serde` | yes | `Serialize`/`Deserialize` for [`Point`], [`PointKind`], [`Resolution`] and [`Spline`]. |
+//! | `tokio` | no | `Interpolator::run_async` and `Interpolator::run_f64_async`. |
+//!
+//! # Stability
+//!
+//! splimes follows semantic versioning. The public API, the numerical contract above and
+//! the method definitions on [`Spline`] are covered: a change to what a method computes,
+//! beyond rounding within the stated bounds, is a breaking change. The minimum supported
+//! Rust version is 1.95; raising it is a minor-version change, announced in the changelog.
+
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![forbid(unsafe_code)]
+#![warn(missing_docs, clippy::pedantic, clippy::nursery)]
+#![allow(clippy::module_name_repetitions, clippy::cast_precision_loss)]
+// `mul_add` is a slow libm call on targets without hardware FMA (including baseline
+// x86-64), and fusing would make the CPU round differently from the WGSL kernels.
+#![allow(clippy::suboptimal_flops)]
+// Proving `Send` through wgpu's nested types exceeds the default limit of 128.
 #![recursion_limit = "256"]
-#![warn(clippy::pedantic, clippy::nursery, clippy::all)]
-#![allow(clippy::multiple_crate_versions, clippy::used_underscore_binding, clippy::similar_names, clippy::module_name_repetitions, clippy::module_inception, clippy::cast_precision_loss)]
 
-use std::sync::LazyLock;
+pub use auto::{AutoThresholds, auto_thresholds, set_auto_thresholds};
+pub use calibrate::{Calibration, CalibrationSample, calibrate};
+pub use error::{Error, Result};
+pub use gpu::{GpuConfig, GpuInfo, GpuPoolStats, configure_gpu, gpu_config, gpu_info, gpu_pool_stats, prewarm_gpu, prewarm_gpu_with_config};
+pub use interpolation::{Backend, Interpolation, Interpolator, Precision, interpolate};
+pub use point::{Point, PointKind};
+pub use resolution::Resolution;
+pub use spline::{MAX_POLYNOMIAL_DEGREE, Spline};
+pub use value::Value;
 
-use anyhow::{Result, bail};
-use chrono::{DateTime, Utc};
-pub use optimizations::{apply_fast_path, cpu_interpolate, parallel_interpolate};
-pub use types::{BASE_BATCH_SIZE, Error, POINT_SIZE, Point, Resolution, Spline};
-
+#[cfg(feature = "tokio")]
+mod asynk;
+mod auto;
+mod calibrate;
+mod error;
 mod gpu;
-pub mod helpers; // Make helpers public to allow access to helpers::should_use_gpu
-mod optimizations;
-mod splines;
-#[cfg(test)]
-mod tests;
-mod types;
+mod interpolation;
+mod kernel;
+mod point;
+mod prepare;
+mod resolution;
+mod spline;
+mod time;
+mod value;
 
 // Compile and run the README's examples as doctests, so they can't drift from the API.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
-
-/// When gpu-eager-init feature is enabled, run GPU prewarm BEFORE main()
-/// This eliminates any latency on the first interpolation call
-#[cfg(feature = "gpu-eager-init")]
-#[ctor::ctor(unsafe)]
-fn _gpu_startup_init() {
-	let _ = gpu::force_init_gpu();
-}
-
-/// Auto-initialize GPU on first library use (passive first-use)
-/// This static ensures GPU prewarming happens automatically when the library is loaded
-/// If gpu-eager-init feature is enabled, this will be a no-op since GPU is already initialized
-static _GPU_AUTO_INIT: LazyLock<()> = LazyLock::new(|| {
-	// GPU prewarming is silently performed on first access
-	// Errors are ignored to ensure the library remains functional even if GPU initialization fails
-	let _ = gpu::force_init_gpu();
-});
-
-/// Ensures GPU auto-initialization is triggered
-/// This is called internally to guarantee GPU prewarming happens on first library use
-#[inline]
-fn ensure_gpu_init() {
-	// Access the lazy static to trigger initialization
-	let () = &*_GPU_AUTO_INIT;
-}
-
-// Re-export for public API
-pub use gpu::{BufferPoolStats, GpuConfig, gpu_interpolate};
-pub use helpers::{InterpolationStrategy, estimate_output_points, generate_target_times, should_use_gpu};
-pub use splines::{DAYS_IN_MONTH, DAYS_IN_YEAR, SECONDS_IN_DAY, SECONDS_IN_HOUR, SECONDS_IN_MINUTE, SECONDS_IN_MONTH, SECONDS_IN_WEEK, SECONDS_IN_YEAR};
-
-/// Pre-warms the GPU interpolator to eliminate first-use latency.
-///
-/// Call this function early during application startup to trigger GPU initialization
-/// before any user interactions that might trigger interpolation. This eliminates the
-/// ~1.2 second latency that would otherwise occur on the first interpolation call.
-///
-/// # Errors
-///
-/// Returns an error if GPU is unavailable or initialization fails.
-///
-/// # Example
-/// ```no_run
-/// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
-///     // Pre-warm GPU at startup to avoid first-use latency
-///     let _ = splimes::prewarm_gpu();
-///
-///     // ... rest of application
-///     Ok(())
-/// }
-/// ```
-pub fn prewarm_gpu() -> Result<()> {
-	gpu::force_init_gpu()
-}
-
-/// Pre-warm the GPU with a custom configuration
-///
-/// Initializes the GPU interpolator with the specified configuration preset.
-/// Call this before any interpolation operations to control GPU resource usage.
-///
-/// The GPU interpolator is a process-wide singleton whose buffer pool and staging buffers are
-/// sized **once**, when it first initializes. So this must be called **before any other GPU
-/// use** — including [`prewarm_gpu`] and any interpolation that selects the GPU backend. If the
-/// GPU is already up, the configuration cannot be applied and this returns an error rather than
-/// silently ignoring it.
-///
-/// [`gpu_config_applied`] reports whether a configuration is in force, and
-/// [`effective_gpu_config`] returns the configuration the interpolator was (or will be) built
-/// with.
-///
-/// # Arguments
-/// * `config` - GPU configuration (use presets like `GpuConfig::low_memory()`,
-///   `GpuConfig::high_performance()`, or `GpuConfig::default()`)
-///
-/// # Errors
-///
-/// - The GPU was **already initialized**, so the pool and staging buffers are already sized.
-/// - Another caller already requested a configuration.
-/// - The GPU is unavailable or initialization fails.
-///
-/// # Interaction with the `gpu-eager-init` feature
-///
-/// The `gpu-eager-init` feature initializes the GPU from a `ctor` **before `main` runs**, so
-/// with it enabled there is no point at which a configuration can be supplied first and this
-/// function will always report that the GPU is already initialized. The feature is **off by
-/// default**; leave it off if you want to configure the GPU.
-///
-/// # Note on `max_command_batch_size`
-///
-/// [`GpuConfig::buffer_pool`] and [`GpuConfig::num_staging_buffers`] are applied to the
-/// interpolator. [`GpuConfig::max_command_batch_size`] is **reserved** — command batching is
-/// not implemented yet (see "Command batching" in ROADMAP.md), so that field currently has no effect. It is
-/// recorded and readable via [`effective_gpu_config`], not acted on.
-///
-/// # Example
-/// ```no_run
-/// use splimes::GpuConfig;
-///
-/// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
-///     // Must come before any other GPU use.
-///     splimes::prewarm_gpu_with_config(GpuConfig::high_performance())?;
-///     assert!(splimes::gpu_config_applied());
-///     Ok(())
-/// }
-/// ```
-pub fn prewarm_gpu_with_config(config: GpuConfig) -> Result<()> {
-	gpu::types::request_gpu_config(config)?;
-	gpu::force_init_gpu()
-}
-
-/// Whether a [`GpuConfig`] supplied through [`prewarm_gpu_with_config`] is in force.
-///
-/// `false` means the interpolator is using (or will use) [`GpuConfig::default`].
-#[must_use]
-pub fn gpu_config_applied() -> bool {
-	gpu::types::gpu_config_requested()
-}
-
-/// The [`GpuConfig`] the global interpolator was built with, or will be built with if it has
-/// not initialized yet.
-#[must_use]
-pub fn effective_gpu_config() -> GpuConfig {
-	gpu::types::effective_gpu_config()
-}
-
-/// Get buffer pool statistics
-///
-/// Returns information about the GPU buffer pool usage including:
-/// - Total number of pooled buffers
-/// - Total allocated memory
-/// - Number of allocations
-/// - Number of buffer reuses
-///
-/// # Errors
-///
-/// Returns an error if GPU interpolator is not initialized.
-///
-/// # Example
-/// ```no_run
-/// let stats = splimes::gpu_buffer_pool_stats()?;
-/// println!("Pool: {} buffers, {:.1} MB allocated",
-///     stats.total_buffers,
-///     stats.total_allocated_bytes as f64 / 1024.0 / 1024.0
-/// );
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-pub fn gpu_buffer_pool_stats() -> Result<BufferPoolStats> {
-	Ok(gpu::types::GpuInterpolator::get_buffer_pool_static()?.stats())
-}
-
-/// Main async interpolation function with GPU acceleration support
-///
-/// This is the primary entry point for all interpolation operations in the library.
-/// It automatically selects the optimal interpolation strategy (GPU, CPU, SIMD, Parallel)
-/// based on dataset characteristics and performance benchmarks.
-///
-/// The GPU is automatically pre-warmed on first use to eliminate initialization latency.
-///
-/// If the requested spline method requires more points than available, this function
-/// will automatically fall back to a simpler method that can work with the available data:
-/// - Cubic (4 points) → Quadratic (3 points) → Linear (2 points)
-/// - Polynomial(n) → lower degree polynomial → Cubic → Quadratic → Linear
-///
-/// With only 1 point, it returns that point's value for any requested time.
-/// With 0 points, it returns an error.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - No measurements provided (0 points)
-/// - Invalid time range (start >= end)
-/// - All interpolation methods fail
-pub async fn auto_interpolate(points: &mut [Point], start: DateTime<Utc>, end: DateTime<Utc>, resolution: Resolution, spline: Spline) -> Result<Vec<Point>> {
-	// Trigger GPU auto-initialization on first use
-	ensure_gpu_init();
-
-	if points.is_empty() {
-		bail!(Error::InsufficientMeasurementsError);
-	}
-
-	if start >= end {
-		bail!(Error::InvalidTimeRangeError);
-	}
-
-	// Handle single point case - return constant value for all requested times
-	if points.len() == 1 {
-		let target_times = helpers::generate_target_times(start, end, resolution);
-		let constant_value = points[0].value.clone();
-		return Ok(target_times.into_iter().map(|t| Point { timestamp: t, value: constant_value.clone() }).collect());
-	}
-
-	// Determine the best available spline method based on point count
-	let effective_spline = select_best_available_spline(spline, points.len());
-
-	let estimated_output_points = helpers::estimate_output_points(start, end, resolution);
-	let effective_spline = apply_fast_path(effective_spline, points.len());
-
-	// Use centralized strategy selection based on benchmark results
-	match helpers::should_use_gpu(points.len(), estimated_output_points) {
-		helpers::InterpolationStrategy::GpuPrimary => {
-			// Try GPU first for very large datasets where it's proven to be faster
-			if let Ok(result) = gpu_interpolate(points, start, end, resolution, effective_spline).await {
-				return Ok(result);
-			}
-			// Fallback to parallel if GPU fails
-			parallel_interpolate(points, &start, &end, effective_spline, resolution).await
-		}
-		helpers::InterpolationStrategy::GpuThenParallel => {
-			// Try GPU with timeout for large datasets where it's competitive
-			let gpu_result = tokio::time::timeout(std::time::Duration::from_secs(10), gpu_interpolate(points, start, end, resolution, effective_spline)).await;
-
-			match gpu_result {
-				Ok(Ok(result)) => Ok(result),
-				_ => {
-					// Quick fallback to parallel
-					parallel_interpolate(points, &start, &end, effective_spline, resolution).await
-				}
-			}
-		}
-		helpers::InterpolationStrategy::Parallel => {
-			// Use parallel for medium-sized datasets
-			parallel_interpolate(points, &start, &end, effective_spline, resolution).await
-		}
-		helpers::InterpolationStrategy::Cpu => {
-			// Use CPU for small datasets to avoid overhead
-			cpu_interpolate(points, start, end, resolution, effective_spline).await
-		}
-	}
-}
-
-/// Select the best available spline method based on the number of points available.
-/// Falls back to simpler methods ONLY - never upgrades to a more complex method than requested.
-/// Fallback order: Polynomial(n) → Polynomial(n-1) → ... → Cubic → Quadratic → Linear
-#[must_use]
-const fn select_best_available_spline(requested: Spline, point_count: usize) -> Spline {
-	// If we have enough points for the requested method, use it exactly as requested
-	if point_count >= requested.number_of_points_required() {
-		return requested;
-	}
-
-	// Not enough points - fall back to simpler methods, respecting the user's requested ceiling
-	// We can only fall back to methods SIMPLER than what was requested
-	match requested {
-		Spline::Linear => {
-			// Linear is the simplest, no fallback possible (needs 2 points minimum)
-			// With 1 point, we handle it specially in auto_interpolate
-			Spline::Linear
-		}
-		Spline::Cubic | Spline::Quadratic => {
-			// Cubic needs 4 points, can fall back to Quadratic (3) or Linear (2)
-			// With 0-1 points, Linear will be handled specially in auto_interpolate
-			if point_count >= 3 { Spline::Quadratic } else { Spline::Linear }
-		}
-		Spline::Polynomial(_degree, _bounds) => {
-			// Polynomial(n) needs n+1 points
-			// Fall back through lower degrees, but cap at Cubic since that's the highest non-polynomial
-			let max_usable_degree = point_count.saturating_sub(1);
-
-			if max_usable_degree > 3 {
-				requested
-			} else if max_usable_degree == 3 {
-				// Can use Cubic (degree 3)
-				Spline::Cubic
-			} else if max_usable_degree == 2 {
-				Spline::Quadratic
-			} else {
-				Spline::Linear
-			}
-		}
-	}
-}
