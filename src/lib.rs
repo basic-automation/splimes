@@ -98,8 +98,11 @@
 //! reference that also computes `Λ`: 258 series (256 randomised, with knot spacings from
 //! microseconds to 30 days, plus a dense-burst and a geometric-gap series), each on five
 //! grids — across both edges, the middle, the densest stretch, and 100 spacings out — for
-//! six methods, plus a two-million-knot series and far-out bounded extrapolation. It fails
-//! if a bound is exceeded.
+//! six methods, plus a two-million-knot series, far-out bounded extrapolation and `f32`
+//! windows at the 1,024× gap limit. It fails if a bound is exceeded. `tests/properties.rs`
+//! checks the same bound, and the input and provenance rules above, on 1,024 generated
+//! series of the input the docs promise to accept: unsorted, with duplicate instants,
+//! single points and constant values.
 //!
 //! # Backends
 //!
