@@ -175,10 +175,7 @@ impl<V> Drop for InterpolationFuture<V> {
 		if !self.wait_on_drop || rayon::current_thread_index().is_some() {
 			return;
 		}
-		let mut state = self.shared.lock();
-		while matches!(*state, State::Running(_)) {
-			state = self.shared.finished.wait(state).unwrap_or_else(PoisonError::into_inner);
-		}
+		drop(self.shared.finished.wait_while(self.shared.lock(), |state| matches!(state, State::Running(_))).unwrap_or_else(PoisonError::into_inner));
 	}
 }
 
