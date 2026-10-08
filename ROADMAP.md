@@ -84,6 +84,15 @@ the published crate and is in progress.
 
 ---
 
+## 1.x: hardening shipped 1.0 behaviour
+
+Additive work on the 1.0 contract: more evidence for what is already promised, and no
+change to what any method computes.
+
+- [x] **Randomised property tests of the input contract** on every backend and precision (`tests/properties.rs`): 1,024 generated series, unsorted with duplicate instants, single points, constant values and decimals beyond `f64`'s digits, checked for order independence (bit for bit), provenance labels and raw values (every digit), the reported step-down and `exact(true)`, the grid's shape, `run`/`run_f64` agreement and the published bound against the exact reference
+
+---
+
 ## Later / not before 1.0
 
 - [ ] More methods: Akima and monotone (PCHIP) splines, which avoid cubic overshoot on step-like data
