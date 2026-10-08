@@ -207,7 +207,7 @@ sparse series, and geometric gaps — each on five grids: across both edges (two
 spacings out), the middle, the densest stretch, and 100 edge spacings out. CI prints the
 same report on every run: for lavapipe (f64 and f32), which the Linux job requires, and
 for the Windows and macOS runners' adapters (WARP and Metal, f32) when they expose one.
-The 1.0.0 release run's results are [below](#ci-runners).
+The 1.0.0 and 1.1.0 release runs' results, identical, are [below](#ci-runners).
 
 **CPU** (`Cpu` and `Parallel`) and **NVIDIA RTX 4070 Ti SUPER, f64**:
 
@@ -250,11 +250,12 @@ leaves the bound about 60× headroom. At 1,100× those windows went to `f64`, as
 
 ### CI runners
 
-From the `v1.0.0` release run, on GitHub's hosted runners. These are software and
-virtualised adapters, not GPUs you would deploy on, but they run each platform's own
-shader compiler: Metal, for one, compiles shaders with fast math, which is what 1.0's
-integer time representation defends against. Of the three, only lavapipe has f64;
-its f64 table matches the CPU table above digit for digit.
+From the `v1.0.0` release run, on GitHub's hosted runners; the `v1.1.0` release run
+measured the same figures, digit for digit. These are software and virtualised
+adapters, not GPUs you would deploy on, but they run each platform's own shader
+compiler: Metal, for one, compiles shaders with fast math, which is what 1.0's integer
+time representation defends against. Of the three, only lavapipe has f64; its f64 table
+matches the CPU table above digit for digit.
 
 | Method | Metal inside | Metal outside | lavapipe inside | lavapipe outside | WARP inside | WARP outside | Published bound |
 |--------|------:|------:|------:|------:|------:|------:|------:|
