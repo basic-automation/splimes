@@ -10,6 +10,8 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-08
+
 ### Added
 
 - `Interpolator::spawn` and `Interpolator::spawn_f64`: start an interpolation on
@@ -204,6 +206,7 @@ that history.
 
 - `Point::random` is now test-only, and `fake` is no longer a runtime dependency.
 
-[Unreleased]: https://github.com/basic-automation/splimes/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/basic-automation/splimes/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/basic-automation/splimes/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/basic-automation/splimes/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/basic-automation/splimes/releases/tag/v0.1.0
