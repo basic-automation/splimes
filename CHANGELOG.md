@@ -15,7 +15,12 @@ supported Rust version is a minor-version change.
 - `Interpolator::spawn` and `Interpolator::spawn_f64`: start an interpolation on
   rayon's pool and get an `InterpolationFuture` that any executor can await (tokio,
   async-std, smol, `futures`), with no feature flag and no new dependency. A panic in
-  the work becomes `Error::Task` instead of aborting.
+  the work becomes `Error::Task` instead of aborting. With `Backend::Gpu`, the first
+  `spawn` opens the device on the calling thread (splimes still never opens it on a
+  thread of its own), and dropping a future the GPU may be computing waits for the work,
+  because a process that exits while the GPU driver is busy on one of rayon's threads can
+  crash in the driver. Called from a rayon worker, `spawn` runs the interpolation there,
+  so blocking on its future can't deadlock the pool.
 - `Error::Task` no longer requires the `tokio` feature: `InterpolationFuture` reports
   through it too.
 
@@ -28,9 +33,10 @@ supported Rust version is a minor-version change.
   calling thread ([BENCHMARKS.md](BENCHMARKS.md#preparing-input)). Results are unchanged.
 - **Faster CPU kernel.** When the knots and the grid lie within about 146 years of the
   first knot (nearly every series), the CPU backends take their exact time differences
-  in `i64` rather than `i128`: 27–39% less time single-threaded and 14–27% on `Parallel`,
-  across methods ([BENCHMARKS.md](BENCHMARKS.md#methods)). Results are bit-identical, and
-  longer spans keep the `i128` path.
+  in `i64` rather than `i128`: 27–39% less time single-threaded, across methods, and
+  less on `Parallel`, where the gain is within run-to-run variance
+  ([BENCHMARKS.md](BENCHMARKS.md#methods)). Results are bit-identical, and longer spans
+  keep the `i128` path.
 - **Cheaper output timestamps.** Grid timestamps are built from integer POSIX seconds on
   a calendar date computed once per day, instead of one chrono `checked_add_signed` per
   point (about 10 ns each): 26% less time for a single-threaded linear interpolation of a

@@ -17,6 +17,9 @@ pub enum Backend {
 	/// [`Gpu`](Self::Gpu) if the program has started the GPU (`Auto` never does) and it can
 	/// run the requested [`Precision`]. A GPU failure falls back to `Parallel` and is
 	/// reported by [`Interpolation::gpu_fallback`]. See [`AutoThresholds`](crate::AutoThresholds).
+	///
+	/// Whatever the grid size, inputs of 16 Ki points or more are prepared on rayon's pool;
+	/// only [`Cpu`](Self::Cpu) keeps the whole call on the calling thread.
 	#[default]
 	Auto,
 	/// The calling thread only, including preparing the input.
@@ -399,7 +402,8 @@ impl<V> Interpolation<V> {
 		self.requested
 	}
 
-	/// The backend that produced the values: `Cpu`, `Parallel` or `Gpu`, never `Auto`.
+	/// The backend that computed the values: `Cpu`, `Parallel` or `Gpu`, never `Auto`. Under
+	/// [`Backend::Auto`], a large input may still have been prepared on rayon's pool.
 	#[must_use]
 	pub const fn backend(&self) -> Backend {
 		self.backend
