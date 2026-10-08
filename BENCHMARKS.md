@@ -236,6 +236,14 @@ inputs inherits it. Λ is the honest yardstick.) The two-million-knot series is 
 
 The two-million-knot series is within 5.7e-8 (linear) to 5.1e-7 (degree 5) in f32.
 
+**f32 at the gap limit.** The `f32` kernel computes every window whose knot gaps are
+within 1,024× of the series' mean spacing and hands the rest to `f64`. With one-second
+gaps 1,000× below the mean among sparse ones, it computed every window itself (no point
+recomputed), worst 1.2e-7 (cubic), 1.6e-7 (degree 5) and 1.1e-7 (degree 8): the limit
+leaves the bound about 60× headroom. At 1,100× those windows went to `f64`, as designed
+(`tests/contract.rs`, `f32_windows_at_the_gap_limit_meet_the_bound`; RTX 4070 Ti SUPER,
+2026-10-08).
+
 ### CI runners
 
 From the `v1.0.0` release run, on GitHub's hosted runners. These are software and
