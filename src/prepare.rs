@@ -1,6 +1,7 @@
 //! Turning caller input into the normalised knot arrays every backend computes on.
 
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 
 use crate::{Error, Result, time::posix_nanos, value::Value};
 
@@ -32,39 +33,74 @@ pub struct Knots<'a, V> {
 	pub max: f64,
 }
 
+/// Inputs from which preparation runs on rayon's pool when the caller allows it: below
+/// this, splitting the work costs more than it saves.
+const PARALLEL_FROM: usize = 1 << 14;
+
 impl<'a, V: Value> Knots<'a, V> {
-	/// Sorts by instant and keeps the **last** of any points at the same instant: a later
-	/// observation replaces an earlier one. Instants are compared on the POSIX scale, so a
-	/// leap second (`23:59:60.x`) is the same instant as `00:00:00.x` the next second.
+	/// The `len` samples `(timestamp(i), value(i))`, sorted by instant, keeping the
+	/// **last** of any at the same instant: a later observation replaces an earlier one.
+	/// Instants are compared on the POSIX scale, so a leap second (`23:59:60.x`) is the
+	/// same instant as `00:00:00.x` the next second.
+	///
+	/// With `parallel`, large inputs are converted and sorted on rayon's pool; the result is
+	/// the same either way.
 	///
 	/// # Errors
 	///
 	/// [`Error::NoPoints`] for empty input; [`Error::ValueOutOfRange`] for a value with no
 	/// finite `f64` representation.
-	pub fn new(timestamps: impl ExactSizeIterator<Item = DateTime<Utc>>, values: impl ExactSizeIterator<Item = &'a V>) -> Result<Self> {
-		let mut samples: Vec<(i128, DateTime<Utc>, &V)> = timestamps.zip(values).map(|(t, v)| (posix_nanos(t), t, v)).collect();
-		if samples.is_empty() {
+	pub fn new(len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, parallel: bool) -> Result<Self> {
+		if len == 0 {
 			return Err(Error::NoPoints);
 		}
+		// Each value is converted once: for `BigDecimal` that is most of the cost.
+		let sample = |i: usize| {
+			let v = value(i);
+			v.to_finite_f64().map(|y| (posix_nanos(timestamp(i)), y, v)).ok_or(i)
+		};
 		// Every value must be finite, including ones a later duplicate replaces: whether bad
-		// input is reported mustn't depend on its position.
-		if let Some(&(_, timestamp, _)) = samples.iter().find(|(_, _, v)| v.to_finite_f64().is_none()) {
-			return Err(Error::ValueOutOfRange { timestamp });
-		}
+		// input is reported mustn't depend on its position. The first in input order is named.
+		let out_of_range = |i: usize| Error::ValueOutOfRange { timestamp: timestamp(i) };
+		let parallel = parallel && len >= PARALLEL_FROM;
+		let mut samples = if parallel {
+			// An indexed collect, which preallocates, with NaN marking a bad value: a converted
+			// value never is NaN.
+			let mut samples = Vec::new();
+			(0..len).into_par_iter().map(|i| sample(i).unwrap_or_else(|_| (0, f64::NAN, value(i)))).collect_into_vec(&mut samples);
+			if let Some(i) = samples.par_iter().position_first(|&(_, y, _)| y.is_nan()) {
+				return Err(out_of_range(i));
+			}
+			samples
+		} else {
+			// Not `collect` into a `Result`, which can't preallocate.
+			let mut samples = Vec::with_capacity(len);
+			for i in 0..len {
+				samples.push(sample(i).map_err(out_of_range)?);
+			}
+			samples
+		};
 		// Stable, so equal instants keep their input order and the last one wins below.
-		samples.sort_by_key(|&(n, _, _)| n);
-		let mut distinct: Vec<(i128, DateTime<Utc>, &V)> = Vec::with_capacity(samples.len());
-		for sample in samples {
-			match distinct.last_mut() {
-				Some(last) if last.0 == sample.0 => *last = sample,
-				_ => distinct.push(sample),
+		// Already-sorted input, the usual case, is only checked.
+		if !samples.is_sorted_by_key(|&(n, _, _)| n) {
+			if parallel {
+				samples.par_sort_by_key(|&(n, _, _)| n);
+			} else {
+				samples.sort_by_key(|&(n, _, _)| n);
 			}
 		}
+		// In place: `dedup_by` keeps the earlier of two equal samples, so move the later one
+		// into its slot first.
+		samples.dedup_by(|later, kept| {
+			let same = later.0 == kept.0;
+			if same {
+				std::mem::swap(later, kept);
+			}
+			same
+		});
+		let distinct = samples;
 
-		let mut raw_values = Vec::with_capacity(distinct.len());
-		for &(_, timestamp, value) in &distinct {
-			raw_values.push(value.to_finite_f64().ok_or(Error::ValueOutOfRange { timestamp })?);
-		}
+		let raw_values: Vec<f64> = distinct.iter().map(|&(_, y, _)| y).collect();
 		let (min, max) = raw_values.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
 		// Halved before subtracting so values near ±f64::MAX can't overflow the width.
 		let half_width = max / 2.0 - min / 2.0;
@@ -107,11 +143,16 @@ mod tests {
 		Utc.timestamp_opt(secs, 0).single().expect("valid")
 	}
 
+	fn from_slices<'a, V: Value>(ts: &[DateTime<Utc>], vs: &'a [V], parallel: bool) -> Result<Knots<'a, V>> {
+		assert_eq!(ts.len(), vs.len());
+		Knots::new(ts.len(), |i| ts[i], |i| &vs[i], parallel)
+	}
+
 	#[test]
 	fn sorts_and_keeps_the_last_duplicate() {
 		let ts = [at(20), at(0), at(10), at(10)];
 		let vs = [2.0, 0.0, 1.0, 9.0];
-		let knots = Knots::new(ts.into_iter(), vs.iter()).expect("knots");
+		let knots = from_slices(&ts, &vs, false).expect("knots");
 		assert_eq!(knots.len(), 3);
 		assert_eq!(knots.offsets, vec![0, 10_000_000_000, 20_000_000_000]);
 		assert_eq!(knots.h, 10_000_000_000.0);
@@ -122,26 +163,49 @@ mod tests {
 
 	#[test]
 	fn constant_and_single_inputs_normalise() {
-		let knots = Knots::new([at(0), at(5)].into_iter(), [7.0, 7.0].iter()).expect("knots");
+		let knots = from_slices(&[at(0), at(5)], &[7.0, 7.0], false).expect("knots");
 		assert_eq!(knots.y, vec![0.0, 0.0]);
 		assert_eq!(knots.centre, 7.0);
-		let knots = Knots::new([at(0)].into_iter(), [3.0].iter()).expect("knots");
+		let knots = from_slices(&[at(0)], &[3.0], false).expect("knots");
 		assert_eq!(knots.offsets, vec![0]);
 	}
 
 	#[test]
 	fn rejects_empty_and_unrepresentable() {
 		let none: [f64; 0] = [];
-		assert!(matches!(Knots::new(std::iter::empty(), none.iter()), Err(Error::NoPoints)));
+		assert!(matches!(from_slices(&[], &none, false), Err(Error::NoPoints)));
 		let huge: BigDecimal = "1e999".parse().expect("parse");
-		assert!(matches!(Knots::new([at(0)].into_iter(), [huge].iter()), Err(Error::ValueOutOfRange { .. })));
-		assert!(matches!(Knots::new([at(0)].into_iter(), [f64::NAN].iter()), Err(Error::ValueOutOfRange { .. })));
+		assert!(matches!(from_slices(&[at(0)], &[huge], false), Err(Error::ValueOutOfRange { .. })));
+		assert!(matches!(from_slices(&[at(0)], &[f64::NAN], false), Err(Error::ValueOutOfRange { .. })));
 	}
 
 	#[test]
 	fn extreme_magnitudes_do_not_overflow_the_scale() {
-		let knots = Knots::new([at(0), at(1)].into_iter(), [f64::MAX, -f64::MAX].iter()).expect("knots");
+		let knots = from_slices(&[at(0), at(1)], &[f64::MAX, -f64::MAX], false).expect("knots");
 		assert!(knots.scale.is_finite() && knots.centre.is_finite());
 		assert_eq!(knots.y, vec![1.0, -1.0]);
+	}
+
+	#[test]
+	fn parallel_preparation_matches_serial() {
+		// Shuffled, with every fourth instant repeated with a different value, and large
+		// enough to take the parallel path.
+		let n = 3 * PARALLEL_FROM;
+		let shuffled = |i: usize| i64::try_from((i * 7_919) % n / 4 * 4).expect("small");
+		let ts: Vec<_> = (0..n).map(|i| at(shuffled(i))).collect();
+		let vs: Vec<f64> = (0..n).map(|i| (f64::from(u32::try_from(i).expect("small")) * 0.37).sin()).collect();
+		let serial = from_slices(&ts, &vs, false).expect("knots");
+		let parallel = from_slices(&ts, &vs, true).expect("knots");
+		assert_eq!(serial.len(), n / 4);
+		assert_eq!(parallel.offsets, serial.offsets);
+		assert_eq!(parallel.y, serial.y);
+		assert!(parallel.originals.iter().zip(&serial.originals).all(|(a, b)| std::ptr::eq(*a, *b)), "the same input wins every instant");
+		// And the first bad value in input order is the one named, either way.
+		let mut bad = vs.clone();
+		bad[n / 2] = f64::NAN;
+		bad[n - 1] = f64::INFINITY;
+		let expected = Err(Error::ValueOutOfRange { timestamp: ts[n / 2] });
+		assert_eq!(from_slices(&ts, &bad, true).map(|k| k.len()), expected);
+		assert_eq!(from_slices(&ts, &bad, false).map(|k| k.len()), expected);
 	}
 }

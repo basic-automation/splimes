@@ -121,8 +121,35 @@ Cubic, `Parallel`, 1,048,576 grid points. Criterion medians.
 
 The knot search is logarithmic, so input size barely matters until there are about as
 many inputs as grid points: then preparing the input (sorting, de-duplicating and
-normalising a million points, single-threaded) and a fresh window per grid point
-dominate.
+normalising a million points) and a fresh window per grid point dominate. (Measured on
+1.0.0, when preparation was single-threaded; see below.)
+
+## Preparing input
+
+Since 1.0.0, every backend but `Cpu` prepares inputs of 16 Ki points or more on rayon's
+pool, and converts each value to `f64` once instead of twice. A million inputs on a
+one-point grid, so preparation is the whole cost; "shuffled" is the same series in a
+scrambled order. Criterion medians, before (`main` at 1.0.0) and after, in one session.
+
+| 1,048,576 inputs | `Cpu` before | `Cpu` after | `Parallel` before | `Parallel` after |
+|------------------|-------:|------:|-------:|------:|
+| `f64`, in order | 22.4 ms | 16.2 ms | 21.3 ms | 13.9 ms |
+| `f64`, shuffled | 70.2 ms | 47.3 ms | 69.7 ms | 24.2 ms |
+| `BigDecimal`, shuffled | 371 ms | 187 ms | 368 ms | 43.4 ms |
+
+And the same change in whole calls, `Parallel` cubic as in [Input size](#input-size):
+
+| | Before | After |
+|-|-------:|------:|
+| 1,048,576 inputs, 1,048,576 grid points | 41.5 ms | 26.3 ms |
+| `Auto`, 32 `BigDecimal` inputs, 60 grid points | 16.8 µs | 12.4 µs |
+
+Measured 2026-10-08 on the machine above with rustc 1.99.0 (stable), otherwise idle (95%
+idle outside the benchmark's own threads). Results are unchanged, bit for bit.
+
+```bash
+cargo bench --bench interpolation -- "prepare|inputs|small"
+```
 
 ## Small calls
 

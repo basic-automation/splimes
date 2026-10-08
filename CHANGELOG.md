@@ -10,6 +10,14 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Changed
+
+- **Faster input preparation.** Every backend except `Cpu` now converts and sorts inputs
+  of 16 Ki points or more on rayon's pool, and each value is converted to `f64` once
+  instead of twice. A million shuffled `BigDecimal` inputs prepare in 43 ms instead of
+  368 ms on `Parallel`, and in 187 ms instead of 371 ms on `Cpu`, which stays on the
+  calling thread ([BENCHMARKS.md](BENCHMARKS.md#preparing-input)). Results are unchanged.
+
 ## [1.0.0] - 2026-10-05
 
 A rewrite of the engine around one precisely defined kernel that every backend
