@@ -91,10 +91,11 @@ assert_eq!(series.spline(), Spline::Quadratic);
 
 From async code, `spawn` (or `spawn_f64`) runs the work on rayon's pool and returns a
 future that any executor can await, with no feature flag:
-`interpolator.spawn(points, start, end).await?`. With `Backend::Gpu`, the first `spawn`
-opens the device on the calling thread, and dropping an unfinished GPU future waits for
-its work, so the process can exit safely. With the `tokio` feature, `run_async` uses
-tokio's blocking pool instead.
+`interpolator.spawn(points, start, end).await?`. Dropping the future cancels work that
+hasn't started. With `Backend::Gpu`, the first `spawn` opens the device on the calling
+thread, and dropping a future whose GPU work has started waits for it, so the process
+can exit safely (`spawn`'s docs have the details). With the `tokio` feature, `run_async`
+uses tokio's blocking pool instead.
 
 ## Accuracy
 

@@ -15,12 +15,13 @@ supported Rust version is a minor-version change.
 - `Interpolator::spawn` and `Interpolator::spawn_f64`: start an interpolation on
   rayon's pool and get an `InterpolationFuture` that any executor can await (tokio,
   async-std, smol, `futures`), with no feature flag and no new dependency. A panic in
-  the work becomes `Error::Task` instead of aborting. With `Backend::Gpu`, the first
-  `spawn` opens the device on the calling thread (splimes still never opens it on a
-  thread of its own), and dropping a future the GPU may be computing waits for the work,
-  because a process that exits while the GPU driver is busy on one of rayon's threads can
-  crash in the driver. Called from a rayon worker, `spawn` runs the interpolation there,
-  so blocking on its future can't deadlock the pool.
+  the work becomes `Error::Task` instead of aborting. Dropping the future cancels work
+  that hasn't started. With `Backend::Gpu`, the first `spawn` opens the device on the
+  calling thread (splimes still never opens it on a thread of its own), and dropping a
+  future whose GPU work has started waits for it, because a process that exits while the
+  GPU driver is busy on one of rayon's threads can crash in the driver; a drop on a rayon
+  worker doesn't wait, so await GPU futures there. Called from a rayon worker, `spawn`
+  runs the interpolation there, so blocking on its future can't deadlock the pool.
 - `Error::Task` no longer requires the `tokio` feature: `InterpolationFuture` reports
   through it too.
 

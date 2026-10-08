@@ -14,8 +14,9 @@ impl Interpolator {
 	/// which any executor can await (tokio, async-std, smol, `futures`), or none: it only
 	/// needs to be polled. Takes the points by value because the task must own them.
 	///
-	/// The work starts at once, not on the first poll. Dropping the future doesn't stop it;
-	/// the result is discarded.
+	/// The work is queued at once, not on the first poll. Dropping the future before the
+	/// work starts cancels it; once started, the work runs to the end and its result is
+	/// discarded.
 	///
 	/// The interpolation occupies a rayon worker while it runs (and uses the rest of the
 	/// pool as [`Backend::Parallel`](crate::Backend::Parallel) would), so the caller's
@@ -29,16 +30,22 @@ impl Interpolator {
 	///   [`run`](Self::run) would, and returns a future that is already complete. Queued
 	///   on the pool instead, it could wait behind the very worker blocked on it.
 	///
-	/// When the GPU may compute the result ([`Backend::Gpu`](crate::Backend::Gpu), or
-	/// [`Backend::Auto`](crate::Backend::Auto) once the GPU is started), dropping the future
-	/// before it completes waits for the work to finish. rayon's threads aren't joined at
-	/// exit, a process that exits while one of them is in the GPU driver can crash there,
-	/// and dropping a future is often the last thing a program does (a runtime shutting
-	/// down, `main` returning). For the same reason, don't end the process any other way,
-	/// such as `std::process::exit`, while such a future is pending.
-	///
 	/// With the `tokio` feature, `Interpolator::run_async` uses tokio's blocking pool
 	/// instead, which the runtime waits for when it shuts down.
+	///
+	/// # The GPU and process exit
+	///
+	/// rayon's threads aren't joined at exit, and a process that exits while one of them is
+	/// in the GPU driver can crash there. Dropping a future is often the last thing a
+	/// program does (a runtime shutting down, `main` returning), so when the GPU may be
+	/// computing the result ([`Backend::Gpu`](crate::Backend::Gpu), or
+	/// [`Backend::Auto`](crate::Backend::Auto) once the GPU has started), dropping a future
+	/// whose work has started blocks until the work finishes. Don't drop such a future
+	/// while holding a lock that rayon work takes, or on a thread that rayon work waits for.
+	///
+	/// A drop on a rayon worker doesn't wait, since that worker could be the one running
+	/// the job. So on rayon workers, and before ending the process any other way (such as
+	/// `std::process::exit`), await GPU futures rather than drop them.
 	///
 	/// ```
 	/// use bigdecimal::BigDecimal;
@@ -74,7 +81,7 @@ impl Interpolator {
 	#[must_use = "the interpolation runs regardless, but its result is in the future"]
 	pub fn spawn(self, points: Vec<Point>, start: DateTime<Utc>, end: DateTime<Utc>) -> InterpolationFuture<BigDecimal> {
 		self.open_gpu_here();
-		InterpolationFuture::spawn(self.may_use_gpu(), move || self.run(&points, start, end))
+		InterpolationFuture::spawn(self.backend, move || self.run(&points, start, end))
 	}
 
 	/// [`spawn`](Self::spawn) for [`run_f64`](Self::run_f64).
@@ -86,7 +93,7 @@ impl Interpolator {
 	#[must_use = "the interpolation runs regardless, but its result is in the future"]
 	pub fn spawn_f64(self, timestamps: Vec<DateTime<Utc>>, values: Vec<f64>, start: DateTime<Utc>, end: DateTime<Utc>) -> InterpolationFuture<f64> {
 		self.open_gpu_here();
-		InterpolationFuture::spawn(self.may_use_gpu(), move || self.run_f64(&timestamps, &values, start, end))
+		InterpolationFuture::spawn(self.backend, move || self.run_f64(&timestamps, &values, start, end))
 	}
 
 	/// With [`Backend::Gpu`](crate::Backend::Gpu), opens the device on the calling thread
@@ -98,25 +105,19 @@ impl Interpolator {
 			let _ = crate::prewarm_gpu();
 		}
 	}
-
-	/// Whether the GPU may compute this call: [`Backend::Gpu`], or [`Backend::Auto`] once
-	/// the GPU is started.
-	fn may_use_gpu(&self) -> bool {
-		self.backend == Backend::Gpu || (self.backend == Backend::Auto && crate::gpu_info().is_some())
-	}
 }
 
 /// An interpolation running on rayon's pool: a [`Future`] of its result, from
 /// [`Interpolator::spawn`] or [`Interpolator::spawn_f64`].
 ///
 /// It works on any executor: it registers the waker it is polled with and wakes it when
-/// the interpolation finishes. It is `Send` and `Unpin`. Dropping it before it completes
-/// waits for the work if the GPU may be computing it; see [`Interpolator::spawn`].
+/// the interpolation finishes. It is `Send` and `Unpin`. Dropping it cancels work that
+/// hasn't started, and can wait for GPU work that has; see [`Interpolator::spawn`].
 #[derive(Debug)]
 pub struct InterpolationFuture<V> {
 	shared: Arc<Shared<V>>,
-	/// Whether dropping the future waits for the work to finish: the GPU may be computing it.
-	wait_on_drop: bool,
+	/// The backend asked for: whether a drop waits for started work depends on it.
+	backend: Backend,
 }
 
 #[derive(Debug)]
@@ -128,9 +129,15 @@ struct Shared<V> {
 
 #[derive(Debug)]
 enum State<V> {
+	/// Queued on rayon's pool, not started.
+	Queued(Option<Waker>),
+	/// Being computed.
 	Running(Option<Waker>),
 	Done(Result<Interpolation<V>>),
+	/// The result went to the caller.
 	Taken,
+	/// Dropped before it started: the job returns without running.
+	Cancelled,
 }
 
 impl<V> Shared<V> {
@@ -141,18 +148,30 @@ impl<V> Shared<V> {
 	fn lock(&self) -> MutexGuard<'_, State<V>> {
 		self.state.lock().unwrap_or_else(PoisonError::into_inner)
 	}
+
+	/// Marks a queued job as running. False if it was cancelled, so it mustn't run.
+	fn start(&self) -> bool {
+		let mut state = self.lock();
+		let State::Queued(waker) = &mut *state else { return false };
+		let waker = waker.take();
+		*state = State::Running(waker);
+		true
+	}
 }
 
 impl<V: Send + 'static> InterpolationFuture<V> {
-	fn spawn(wait_on_drop: bool, work: impl FnOnce() -> Result<Interpolation<V>> + Send + 'static) -> Self {
+	fn spawn(backend: Backend, work: impl FnOnce() -> Result<Interpolation<V>> + Send + 'static) -> Self {
 		// On a rayon worker already, run here: a job queued on the pool could otherwise wait
 		// behind the very worker that is blocked on its future, which never finishes.
 		if rayon::current_thread_index().is_some() {
-			return Self { shared: Arc::new(Shared::new(State::Done(caught(work)))), wait_on_drop: false };
+			return Self { shared: Arc::new(Shared::new(State::Done(caught(work)))), backend };
 		}
-		let shared = Arc::new(Shared::new(State::Running(None)));
+		let shared = Arc::new(Shared::new(State::Queued(None)));
 		let task = Arc::clone(&shared);
 		rayon::spawn(move || {
+			if !task.start() {
+				return;
+			}
 			let result = caught(work);
 			let previous = std::mem::replace(&mut *task.lock(), State::Done(result));
 			// Both outside the lock, so the executor can poll straight away.
@@ -161,21 +180,43 @@ impl<V: Send + 'static> InterpolationFuture<V> {
 				waker.wake();
 			}
 		});
-		Self { shared, wait_on_drop }
+		Self { shared, backend }
+	}
+}
+
+impl<V> InterpolationFuture<V> {
+	/// Whether the GPU may be computing the result: [`Backend::Gpu`], or [`Backend::Auto`]
+	/// once anything has begun opening the GPU. Decided when it's needed, because an `Auto`
+	/// job picks its backend only when it runs.
+	fn gpu_may_compute(&self) -> bool {
+		match self.backend {
+			Backend::Gpu => true,
+			Backend::Auto => crate::gpu::started(),
+			_ => false,
+		}
 	}
 }
 
 impl<V> Drop for InterpolationFuture<V> {
 	fn drop(&mut self) {
+		// Work that hasn't started is cancelled: it never runs, so it never reaches the GPU.
+		let running = {
+			let mut state = self.shared.lock();
+			if matches!(*state, State::Queued(_)) {
+				*state = State::Cancelled;
+				false
+			} else {
+				matches!(*state, State::Running(_))
+			}
+		};
 		// Dropping a future is often the last thing a program does before it exits (a runtime
 		// shutting down, `main` returning), and a process that exits while the GPU driver is
-		// busy on one of rayon's threads, which nothing joins, can crash in the driver. So if
-		// the GPU may be computing the result, wait for the work. Not on a rayon worker,
-		// though: the job could be queued behind this very thread.
-		if !self.wait_on_drop || rayon::current_thread_index().is_some() {
-			return;
+		// busy on one of rayon's threads, which nothing joins, can crash in the driver. So
+		// wait for GPU work that has started. Not on a rayon worker, though: it could be the
+		// worker running the job, having stolen this drop while the job waits on a join.
+		if running && self.gpu_may_compute() && rayon::current_thread_index().is_none() {
+			drop(self.shared.finished.wait_while(self.shared.lock(), |state| matches!(state, State::Running(_))).unwrap_or_else(PoisonError::into_inner));
 		}
-		drop(self.shared.finished.wait_while(self.shared.lock(), |state| matches!(state, State::Running(_))).unwrap_or_else(PoisonError::into_inner));
 	}
 }
 
@@ -194,7 +235,7 @@ impl<V> Future for InterpolationFuture<V> {
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let mut state = self.shared.lock();
 		match &mut *state {
-			State::Running(waker) => {
+			State::Queued(waker) | State::Running(waker) => {
 				// The executor may move the task between polls; keep the latest waker.
 				match waker {
 					Some(w) if w.will_wake(cx.waker()) => {}
@@ -207,6 +248,8 @@ impl<V> Future for InterpolationFuture<V> {
 				_ => Poll::Ready(Err(Error::Task("the interpolation's result was lost".to_owned()))),
 			},
 			State::Taken => Poll::Ready(Err(Error::Task("polled after the interpolation's result was taken".to_owned()))),
+			// Only a drop cancels, and nothing polls a dropped future.
+			State::Cancelled => Poll::Ready(Err(Error::Task("the interpolation was cancelled".to_owned()))),
 		}
 	}
 }
@@ -214,7 +257,9 @@ impl<V> Future for InterpolationFuture<V> {
 #[cfg(test)]
 mod tests {
 	use std::{
-		sync::atomic::{AtomicUsize, Ordering}, task::Wake, thread::{self, Thread}
+		sync::{
+			Barrier, atomic::{AtomicBool, AtomicUsize, Ordering}, mpsc
+		}, task::Wake, thread::{self, Thread}, time::{Duration, Instant}
 	};
 
 	use chrono::TimeZone;
@@ -285,48 +330,120 @@ mod tests {
 
 	#[test]
 	fn a_panicking_task_becomes_an_error() {
-		let f: InterpolationFuture<f64> = InterpolationFuture::spawn(false, || panic!("boom"));
+		let f: InterpolationFuture<f64> = InterpolationFuture::spawn(Backend::Parallel, || panic!("boom"));
 		let (out, _) = block_on(f);
 		assert_eq!(out, Err(Error::Task("the interpolation panicked: boom".to_owned())));
 	}
 
+	const PATIENCE: Duration = Duration::from_secs(30);
+
+	/// Waits until nothing but `shared` refers to the task's state: the job has returned.
+	fn wait_until_freed<T>(shared: &std::sync::Weak<T>) {
+		let deadline = Instant::now() + PATIENCE;
+		while shared.upgrade().is_some() {
+			assert!(Instant::now() < deadline, "the task's state was never freed");
+			thread::yield_now();
+		}
+	}
+
 	#[test]
-	fn dropping_the_future_lets_the_work_finish() {
-		let (finished, done) = std::sync::mpsc::channel();
-		let f: InterpolationFuture<f64> = InterpolationFuture::spawn(false, move || {
-			std::thread::sleep(std::time::Duration::from_millis(50));
+	fn dropping_a_started_future_lets_the_work_finish() {
+		let (started, has_started) = mpsc::channel();
+		let (finished, has_finished) = mpsc::channel();
+		let f: InterpolationFuture<f64> = InterpolationFuture::spawn(Backend::Parallel, move || {
+			started.send(()).expect("the test is waiting");
+			thread::sleep(Duration::from_millis(50));
 			finished.send(()).expect("the test is waiting");
 			Err(Error::NoPoints)
 		});
+		has_started.recv_timeout(PATIENCE).expect("the work started");
 		let shared = Arc::downgrade(&f.shared);
 		drop(f);
-		// rayon still runs the task to the end, and its result goes nowhere...
-		done.recv_timeout(std::time::Duration::from_secs(30)).expect("the dropped work finished");
-		// ...and once it has, nothing of it is left behind.
-		let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-		while shared.upgrade().is_some() {
-			assert!(std::time::Instant::now() < deadline, "the task's state was never freed");
-			thread::yield_now();
-		}
+		// rayon runs the task to the end, its result goes nowhere, and nothing is left behind.
+		has_finished.recv_timeout(PATIENCE).expect("the dropped work finished");
+		wait_until_freed(&shared);
 		// A later call is unaffected.
 		let (out, _) = block_on(Interpolator::new(Spline::Linear, Resolution::Seconds).spawn_f64(vec![at(0), at(1)], vec![0.0, 1.0], at(0), at(1)));
 		assert_eq!(out.expect("runs").len(), 2);
 	}
 
 	#[test]
-	fn dropping_a_future_the_gpu_may_compute_waits_for_the_work() {
-		let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-		let flag = Arc::clone(&finished);
-		let f: InterpolationFuture<f64> = InterpolationFuture::spawn(true, move || {
-			std::thread::sleep(std::time::Duration::from_millis(100));
+	fn dropping_a_queued_future_cancels_its_work() {
+		// Every worker of rayon's global pool waits at a barrier, so the job stays queued.
+		let workers = rayon::current_num_threads();
+		let (busy, release) = (Arc::new(Barrier::new(workers + 1)), Arc::new(Barrier::new(workers + 1)));
+		for _ in 0..workers {
+			let (busy, release) = (Arc::clone(&busy), Arc::clone(&release));
+			rayon::spawn(move || {
+				busy.wait();
+				release.wait();
+			});
+		}
+		busy.wait();
+		let ran = Arc::new(AtomicBool::new(false));
+		let flag = Arc::clone(&ran);
+		let f: InterpolationFuture<f64> = InterpolationFuture::spawn(Backend::Gpu, move || {
 			flag.store(true, Ordering::SeqCst);
 			Err(Error::NoPoints)
 		});
-		drop(f);
-		assert!(finished.load(Ordering::SeqCst), "drop returned before the work finished");
-		// An explicit GPU interpolation is such a future, whether or not a GPU is present.
-		assert!(Interpolator::new(Spline::Linear, Resolution::Seconds).backend(crate::Backend::Gpu).spawn_f64(vec![at(0), at(1)], vec![0.0, 1.0], at(0), at(1)).wait_on_drop);
-		assert!(!Interpolator::new(Spline::Linear, Resolution::Seconds).backend(crate::Backend::Parallel).spawn_f64(vec![at(0), at(1)], vec![0.0, 1.0], at(0), at(1)).wait_on_drop);
+		let shared = Arc::downgrade(&f.shared);
+		drop(f); // queued: cancelled, and it returns at once even though it's GPU work
+		release.wait();
+		wait_until_freed(&shared);
+		assert!(!ran.load(Ordering::SeqCst), "cancelled work ran");
+	}
+
+	#[test]
+	fn dropping_started_gpu_work_waits_for_it() {
+		let (started, has_started) = mpsc::channel();
+		let finished = Arc::new(AtomicBool::new(false));
+		let flag = Arc::clone(&finished);
+		let f: InterpolationFuture<f64> = InterpolationFuture::spawn(Backend::Gpu, move || {
+			started.send(()).expect("the test is waiting");
+			thread::sleep(Duration::from_millis(100));
+			flag.store(true, Ordering::SeqCst);
+			Err(Error::NoPoints)
+		});
+		has_started.recv_timeout(PATIENCE).expect("the work started");
+		// Dropped on a thread of its own, so a drop that never returns fails the test.
+		let (dropped, has_dropped) = mpsc::channel();
+		thread::spawn(move || {
+			drop(f);
+			dropped.send(finished.load(Ordering::SeqCst)).expect("the test is waiting");
+		});
+		assert!(has_dropped.recv_timeout(PATIENCE).expect("the drop returned"), "the drop returned before the work finished");
+	}
+
+	#[test]
+	fn a_drop_on_a_rayon_worker_does_not_wait() {
+		let (started, has_started) = mpsc::channel();
+		let (release, released) = mpsc::channel::<()>();
+		let f: InterpolationFuture<f64> = InterpolationFuture::spawn(Backend::Gpu, move || {
+			started.send(()).expect("the test is waiting");
+			let _ = released.recv_timeout(PATIENCE);
+			Err(Error::NoPoints)
+		});
+		has_started.recv_timeout(PATIENCE).expect("the work started");
+		let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().expect("a pool");
+		let (dropped, has_dropped) = mpsc::channel();
+		thread::spawn(move || {
+			pool.install(move || drop(f));
+			dropped.send(()).expect("the test is waiting");
+		});
+		has_dropped.recv_timeout(PATIENCE).expect("the drop returned while the work was still running");
+		release.send(()).expect("the job is waiting");
+	}
+
+	#[test]
+	fn whether_a_drop_waits_depends_on_the_backend_and_the_gpu() {
+		let future = |backend| InterpolationFuture::<f64> { shared: Arc::new(Shared::new(State::Taken)), backend };
+		assert!(future(Backend::Gpu).gpu_may_compute());
+		assert!(!future(Backend::Parallel).gpu_may_compute());
+		assert!(!future(Backend::Cpu).gpu_may_compute());
+		assert_eq!(future(Backend::Auto).gpu_may_compute(), crate::gpu::started());
+		// Once anything has begun opening the GPU, an Auto job may be computing on it.
+		let _ = crate::prewarm_gpu();
+		assert_eq!(future(Backend::Auto).gpu_may_compute(), cfg!(feature = "gpu"));
 	}
 
 	#[test]
@@ -339,7 +456,7 @@ mod tests {
 			let out = pool.install(|| block_on(Interpolator::new(Spline::Linear, Resolution::Seconds).spawn_f64(vec![at(0), at(4)], vec![0.0, 4.0], at(0), at(4))));
 			sent.send(out).expect("the test is waiting");
 		});
-		let (out, wakes) = received.recv_timeout(std::time::Duration::from_secs(30)).expect("no deadlock");
+		let (out, wakes) = received.recv_timeout(PATIENCE).expect("no deadlock");
 		assert_eq!(out.expect("runs").len(), 5);
 		assert_eq!(wakes, 0, "complete on the first poll");
 	}
