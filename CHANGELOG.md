@@ -22,6 +22,10 @@ supported Rust version is a minor-version change.
   in `i64` rather than `i128`: 27–39% less time single-threaded and 14–27% on `Parallel`,
   across methods ([BENCHMARKS.md](BENCHMARKS.md#methods)). Results are bit-identical, and
   longer spans keep the `i128` path.
+- **Cheaper output timestamps.** Grid timestamps are built from integer POSIX seconds on
+  a calendar date computed once per day, instead of one chrono `checked_add_signed` per
+  point (about 10 ns each): 26% less time for a single-threaded linear interpolation of a
+  million points. The timestamps are the same.
 
 ## [1.0.0] - 2026-10-05
 

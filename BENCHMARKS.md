@@ -111,6 +111,22 @@ session, criterion medians:
 Measured 2026-10-08 on the machine above with rustc 1.99.0 (stable), otherwise idle.
 `cargo bench --bench interpolation -- methods` reproduces it (the `cpu/` rows are `Cpu`).
 
+Building the output itself got cheaper too: each output timestamp used to cost a
+`checked_add_signed` in chrono, about 10 ns; it is now built from integer POSIX seconds
+on a calendar date computed once per day, giving the same instants. Starting from the
+"after" column above, same conditions:
+
+| Method | `Parallel` before | `Parallel` after | `Cpu` before | `Cpu` after |
+|--------|-------:|------:|-------:|------:|
+| `Linear` | 5.03 ms | 4.76 ms | 18.0 ms | 13.2 ms |
+| `Cubic` | 6.70 ms | 5.93 ms | 27.5 ms | 24.1 ms |
+| `Polynomial(8, None)` | 10.1 ms | 8.24 ms | 49.7 ms | 46.4 ms |
+
+The 1 Mi-point `f64` call in [`BigDecimal` at the edges](#bigdecimal-at-the-edges) went
+from 6.98 to 5.52 ms. Two smaller cases moved within their noise: the 64 Ki-point
+`BigDecimal` call (3.77 → 4.00 ms, its `f64` twin ±11%) and the 60-point `Auto` call
+(10.4 → 10.6 µs).
+
 ## `BigDecimal` at the edges
 
 The same cubic interpolation through `run` (`BigDecimal` in and out) and `run_f64`,
