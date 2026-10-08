@@ -141,3 +141,26 @@ pub fn gpu_or_skip(test: &str) -> Option<splimes::GpuInfo> {
 		}
 	}
 }
+
+/// The smallest executor: poll, park until woken, repeat. Enough to await an
+/// `InterpolationFuture` without a runtime.
+pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
+	use std::{
+		sync::Arc, task::{Context, Poll, Wake}, thread::{self, Thread}
+	};
+	struct Unpark(Thread);
+	impl Wake for Unpark {
+		fn wake(self: Arc<Self>) {
+			self.0.unpark();
+		}
+	}
+	let waker = Arc::new(Unpark(thread::current())).into();
+	let mut cx = Context::from_waker(&waker);
+	let mut f = std::pin::pin!(f);
+	loop {
+		if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+			return v;
+		}
+		thread::park();
+	}
+}

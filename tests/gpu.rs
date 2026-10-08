@@ -262,3 +262,31 @@ fn extreme_time_ranges_match_the_cpu() {
 		}
 	}
 }
+
+/// Many `spawn`ed GPU interpolations in flight at once on rayon's pool, awaited together
+/// on one thread: each gets its own answer, from the GPU.
+#[test]
+fn spawned_gpu_calls_run_concurrently() {
+	let Some((info, _serial)) = gpu("spawned_gpu_calls_run_concurrently") else { return };
+	let precision = precisions(&info)[0];
+	let jobs: Vec<_> = (0..16_i64)
+		.map(|j| {
+			let n = 30 + j * 5;
+			let ts: Vec<_> = (0..n).map(|i| epoch() + TimeDelta::milliseconds(i * (250 + j * 20))).collect();
+			let vs: Vec<f64> = (0..n).map(|i| (i as f64 * 0.2 + j as f64).sin() * (1.0 + j as f64)).collect();
+			let make = |backend| Interpolator::new(Spline::Cubic, Resolution::Milliseconds).backend(backend).gpu_precision(precision);
+			let cpu = make(Backend::Cpu).run_f64(&ts, &vs, ts[0], ts[ts.len() - 1]).expect("cpu");
+			let future = make(Backend::Gpu).spawn_f64(ts.clone(), vs, ts[0], ts[ts.len() - 1]);
+			(j, cpu, future)
+		})
+		.collect();
+	for (j, cpu, future) in jobs {
+		let gpu = common::block_on(future).expect("gpu");
+		assert_eq!(gpu.backend(), Backend::Gpu, "job {j}");
+		assert_eq!(gpu.len(), cpu.len(), "job {j}");
+		let tolerance = if precision == Precision::F64 { 1e-12 } else { 1e-3 } * (1.0 + j as f64);
+		for (g, c) in gpu.values().iter().zip(cpu.values()) {
+			assert!((g - c).abs() <= tolerance, "job {j}: gpu {g} vs cpu {c}");
+		}
+	}
+}
