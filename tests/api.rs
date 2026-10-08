@@ -241,6 +241,33 @@ fn serde_wire_formats_are_stable() {
 	assert_eq!(serde_json::from_str::<Spline>(r#"{"Polynomial":[3,1.5]}"#).expect("parses"), Spline::Polynomial(3, Some(1.5)));
 }
 
+/// `Spline`'s text and serde forms round-trip every valid value bit for bit, bounds factors
+/// included (subnormal, huge, negative zero), and its parser refuses every invalid one.
+#[test]
+fn spline_text_forms_round_trip() {
+	let mut rng = common::Rng::new(0x5_911E);
+	let mut bounds: Vec<Option<f64>> = vec![None, Some(0.0), Some(-0.0), Some(f64::MIN_POSITIVE / 8.0), Some(f64::MAX), Some(1.0 / 3.0), Some(1e-300)];
+	// Random finite, non-negative doubles across every exponent.
+	bounds.extend((0..500).map(|_| Some(f64::from_bits(rng.next_u64() >> 1))).filter(|b| b.is_some_and(f64::is_finite)));
+	for degree in 1..=MAX_POLYNOMIAL_DEGREE {
+		for &b in &bounds {
+			let spline = Spline::Polynomial(degree, b);
+			let parsed: Spline = spline.to_string().parse().unwrap_or_else(|e| panic!("{spline}: {e}"));
+			assert_eq!(parsed.degree(), degree);
+			assert_eq!(parsed.bounds_factor().map(f64::to_bits), b.map(f64::to_bits), "{spline}");
+			#[cfg(feature = "serde")]
+			{
+				let json = serde_json::to_string(&spline).expect("serialises");
+				let back: Spline = serde_json::from_str(&json).expect("deserialises");
+				assert_eq!(back.bounds_factor().map(f64::to_bits), b.map(f64::to_bits), "{json}");
+			}
+		}
+	}
+	for invalid in ["Polynomial(degree: 0, bounds_factor: None)", "Polynomial(degree: 9, bounds_factor: None)", "Polynomial(degree: 3, bounds_factor: -1)", "Polynomial(degree: 3, bounds_factor: NaN)", "Polynomial(degree: 3, bounds_factor: inf)", "Polynomial(degree: 3)", "Polynomial(3, None)", "Akima", ""] {
+		assert!(invalid.parse::<Spline>().is_err(), "{invalid:?} parsed");
+	}
+}
+
 #[cfg(feature = "serde")]
 mod erased {
 	pub trait Ser {

@@ -44,6 +44,10 @@ pub const MAX_POLYNOMIAL_DEGREE: usize = 8;
 /// single input point gives a constant series, reported as `Linear` (or
 /// `Polynomial(1, b)` if a polynomial was asked for).
 ///
+/// With the `serde` feature, a `Polynomial`'s bounds factor is serialised as a plain
+/// `f64`. `serde_json`'s default float parser can read one back an ulp off; enable
+/// `serde_json`'s `float_roundtrip` feature when a stored method must come back bit for bit.
+///
 /// `#[non_exhaustive]`, so new methods can arrive in minor releases.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

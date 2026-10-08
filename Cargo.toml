@@ -46,7 +46,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # Parses and validates the WGSL shaders in unit tests, with no GPU needed. Same major as
 # the naga wgpu uses, so it adds no extra build.
 naga = { version = "30", features = ["wgsl-in"] }
-serde_json = "1.0.100"
+serde_json = { version = "1.0.100", features = ["float_roundtrip"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [[bench]]
