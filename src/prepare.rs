@@ -204,11 +204,14 @@ mod tests {
 		assert_eq!(parallel.offsets, serial.offsets);
 		assert_eq!(parallel.y, serial.y);
 		assert!(parallel.originals.iter().zip(&serial.originals).all(|(a, b)| std::ptr::eq(*a, *b)), "the same input wins every instant");
-		// And the first bad value in input order is the one named, either way.
+		// And the first bad value in input order is the one named, either way, even when a
+		// later input is the earlier instant (so naming the earliest in time would differ).
+		let (first, later) = (1, 7);
+		assert!(ts[first] > ts[later], "the later input must be the earlier instant");
 		let mut bad = vs.clone();
-		bad[n / 2] = f64::NAN;
-		bad[n - 1] = f64::INFINITY;
-		let expected = Err(Error::ValueOutOfRange { timestamp: ts[n / 2] });
+		bad[first] = f64::NAN;
+		bad[later] = f64::INFINITY;
+		let expected = Err(Error::ValueOutOfRange { timestamp: ts[first] });
 		assert_eq!(from_slices(&ts, &bad, true).map(|k| k.len()), expected);
 		assert_eq!(from_slices(&ts, &bad, false).map(|k| k.len()), expected);
 	}

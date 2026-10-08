@@ -116,8 +116,9 @@
 //!
 //! All entry points are synchronous and CPU- or GPU-bound. From async code, use
 //! [`Interpolator::spawn`], which runs the work on rayon's pool and returns a future any
-//! executor can await, the `tokio` feature's `Interpolator::run_async` (tokio's blocking
-//! pool), or your runtime's equivalent of `spawn_blocking`.
+//! executor can await (its docs say when it blocks, and what dropping it does, with the
+//! GPU), the `tokio` feature's `Interpolator::run_async` (tokio's blocking pool), or your
+//! runtime's equivalent of `spawn_blocking`.
 //!
 //! # Features
 //!

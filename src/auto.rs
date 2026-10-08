@@ -12,7 +12,8 @@ use crate::{Backend, Precision};
 /// and can run that precision; otherwise on [`Backend::Parallel`] if
 /// `m >= parallel_min_points`; otherwise on [`Backend::Cpu`]. Only the grid size matters:
 /// the kernel's cost per point is logarithmic in the number of inputs, so inputs barely
-/// move the crossovers.
+/// move the crossovers. (Preparing the input is separate: inputs of 16 Ki points or more
+/// are prepared on rayon's pool whatever the grid size and these thresholds.)
 ///
 /// The defaults come from the measurements in `BENCHMARKS.md`: rayon pays off from about
 /// 64 Ki points, and the GPU is off, because on a 16-core desktop it only matched the
@@ -25,7 +26,7 @@ use crate::{Backend, Precision};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct AutoThresholds {
-	/// Grid points from which `Auto` uses the rayon pool.
+	/// Grid points from which `Auto` computes on the rayon pool.
 	pub parallel_min_points: usize,
 	/// Grid points from which `Auto` uses the GPU for [`Precision::F64`] calls.
 	/// `usize::MAX` means never.
@@ -89,13 +90,16 @@ thread_local! {
 }
 
 /// The backend `Auto` runs a call with `points` grid points on.
-pub fn choose(points: usize, precision: Precision) -> Backend {
+///
+/// `gpu`: whether the GPU may be used at all (false for an `Auto` job spawned before the
+/// GPU had started; see `Interpolator::spawn`).
+pub fn choose(points: usize, precision: Precision, gpu: bool) -> Backend {
 	#[cfg(test)]
 	if FORCE_GPU.get() {
 		return Backend::Gpu;
 	}
 	let t = auto_thresholds();
-	if points >= t.gpu_min_points_for(precision) && crate::gpu::ready(precision) {
+	if gpu && points >= t.gpu_min_points_for(precision) && crate::gpu::ready(precision) {
 		Backend::Gpu
 	} else if points >= t.parallel_min_points {
 		Backend::Parallel

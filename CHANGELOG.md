@@ -10,12 +10,21 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-08
+
 ### Added
 
 - `Interpolator::spawn` and `Interpolator::spawn_f64`: start an interpolation on
   rayon's pool and get an `InterpolationFuture` that any executor can await (tokio,
   async-std, smol, `futures`), with no feature flag and no new dependency. A panic in
-  the work becomes `Error::Task` instead of aborting.
+  the work becomes `Error::Task` instead of aborting. Dropping the future cancels work
+  that hasn't started. A process that exits while the GPU driver is busy on one of
+  rayon's threads can crash in the driver, so: with `Backend::Gpu`, the first `spawn`
+  opens the device on the calling thread (splimes still never opens it on a thread of
+  its own); `Backend::Auto` uses the GPU only if it had started when `spawn` was called;
+  and dropping a future whose GPU work has started waits for it, except on a rayon
+  worker. Called from a rayon worker, `spawn` runs the interpolation there, so blocking
+  on its future can't deadlock the pool.
 - `Error::Task` no longer requires the `tokio` feature: `InterpolationFuture` reports
   through it too.
 
@@ -28,9 +37,10 @@ supported Rust version is a minor-version change.
   calling thread ([BENCHMARKS.md](BENCHMARKS.md#preparing-input)). Results are unchanged.
 - **Faster CPU kernel.** When the knots and the grid lie within about 146 years of the
   first knot (nearly every series), the CPU backends take their exact time differences
-  in `i64` rather than `i128`: 27–39% less time single-threaded and 14–27% on `Parallel`,
-  across methods ([BENCHMARKS.md](BENCHMARKS.md#methods)). Results are bit-identical, and
-  longer spans keep the `i128` path.
+  in `i64` rather than `i128`: 27–39% less time single-threaded, across methods, and
+  less on `Parallel`, where the gain is within run-to-run variance
+  ([BENCHMARKS.md](BENCHMARKS.md#methods)). Results are bit-identical, and longer spans
+  keep the `i128` path.
 - **Cheaper output timestamps.** Grid timestamps are built from integer POSIX seconds on
   a calendar date computed once per day, instead of one chrono `checked_add_signed` per
   point (about 10 ns each): 26% less time for a single-threaded linear interpolation of a
@@ -197,6 +207,7 @@ that history.
 
 - `Point::random` is now test-only, and `fake` is no longer a runtime dependency.
 
-[Unreleased]: https://github.com/basic-automation/splimes/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/basic-automation/splimes/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/basic-automation/splimes/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/basic-automation/splimes/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/basic-automation/splimes/releases/tag/v0.1.0

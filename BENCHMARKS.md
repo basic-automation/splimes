@@ -10,7 +10,7 @@ What splimes 1.0 costs, how accurate each backend is, and how to reproduce both.
 | GPU | NVIDIA GeForce RTX 4070 Ti SUPER, driver 610.57.04, Vulkan |
 | OS | Linux 7.2 (Arch-based) |
 | Toolchain | rustc 1.100.0-nightly (2026-09-22), release profile |
-| Crates | splimes 1.0.0, wgpu 30.0.1, rayon 1.12.0, criterion 0.8 |
+| Crates | splimes 1.0.0 (1.1.0 in the "after" columns), wgpu 30.0.1, rayon 1.12.0, criterion 0.8 |
 | Date | 2026-10-05 |
 
 The machine had other work running during these runs (load average 15–20 on 16 cores),
@@ -95,7 +95,7 @@ Consecutive grid points that share a window reuse its Lagrange weights; each poi
 takes its `degree + 1` time differences exactly, from integer nanoseconds, which is what
 keeps the error bound independent of how the knots are spaced.
 
-Since 1.0.0, when the knots and the grid all lie within about 146 years (2⁶² ns) of the
+In 1.1.0, when the knots and the grid all lie within about 146 years (2⁶² ns) of the
 first knot, which is nearly every series, those differences are taken in `i64` instead of
 `i128`, with bit-identical results. Same benchmark, before (`main`) and after, in one
 session, criterion medians:
@@ -114,7 +114,9 @@ Measured 2026-10-08 on the machine above with rustc 1.99.0 (stable), otherwise i
 Building the output itself got cheaper too: each output timestamp used to cost a
 `checked_add_signed` in chrono, about 10 ns; it is now built from integer POSIX seconds
 on a calendar date computed once per day, giving the same instants. Starting from the
-"after" column above, same conditions:
+"after" column above, in a later session. `Parallel` medians moved by up to 21% between
+the two sessions (`Polynomial(8, None)`: 8.37 ms above, 10.1 ms here), so read the
+`Parallel` columns of both tables as indicative; the `Cpu` ones agree within 2%:
 
 | Method | `Parallel` before | `Parallel` after | `Cpu` before | `Cpu` after |
 |--------|-------:|------:|-------:|------:|
@@ -158,7 +160,7 @@ normalising a million points) and a fresh window per grid point dominate. (Measu
 
 ## Preparing input
 
-Since 1.0.0, every backend but `Cpu` prepares inputs of 16 Ki points or more on rayon's
+In 1.1.0, every backend but `Cpu` prepares inputs of 16 Ki points or more on rayon's
 pool, and converts each value to `f64` once instead of twice. A million inputs on a
 one-point grid, so preparation is the whole cost; "shuffled" is the same series in a
 scrambled order. Criterion medians, before (`main` at 1.0.0) and after, in one session.
@@ -185,7 +187,9 @@ cargo bench --bench interpolation -- "prepare|inputs|small"
 
 ## Small calls
 
-`Auto`, cubic, 32 `BigDecimal` inputs: a typical query. Criterion medians.
+`Auto`, cubic, 32 `BigDecimal` inputs: a typical query. Criterion medians, measured on
+1.0.0 on the loaded machine; [Preparing input](#preparing-input) has the 60-point call on
+an idle machine, before and after 1.1.0.
 
 | Grid points | Time |
 |------------:|-----:|

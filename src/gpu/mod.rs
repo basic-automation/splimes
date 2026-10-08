@@ -105,6 +105,16 @@ pub fn gpu_pool_stats() -> Option<GpuPoolStats> {
 	None
 }
 
+/// Whether anything has begun opening the GPU device: it may still be opening, or have
+/// failed to. Never blocks.
+#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
+pub fn started() -> bool {
+	#[cfg(feature = "gpu")]
+	return context::started();
+	#[cfg(not(feature = "gpu"))]
+	false
+}
+
 /// Runs the kernel on the GPU.
 #[cfg_attr(not(feature = "gpu"), allow(unused_variables, clippy::needless_pass_by_ref_mut))]
 pub fn eval<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, out: &mut [f64]) -> Result<()> {

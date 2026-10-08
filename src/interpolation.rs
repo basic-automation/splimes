@@ -17,6 +17,9 @@ pub enum Backend {
 	/// [`Gpu`](Self::Gpu) if the program has started the GPU (`Auto` never does) and it can
 	/// run the requested [`Precision`]. A GPU failure falls back to `Parallel` and is
 	/// reported by [`Interpolation::gpu_fallback`]. See [`AutoThresholds`](crate::AutoThresholds).
+	///
+	/// Whatever the grid size, inputs of 16 Ki points or more are prepared on rayon's pool;
+	/// only [`Cpu`](Self::Cpu) keeps the whole call on the calling thread.
 	#[default]
 	Auto,
 	/// The calling thread only, including preparing the input.
@@ -91,7 +94,7 @@ impl fmt::Display for Precision {
 pub struct Interpolator {
 	spline: Spline,
 	resolution: Resolution,
-	backend: Backend,
+	pub(crate) backend: Backend,
 	precision: Precision,
 	exact: bool,
 	max_points: usize,
@@ -170,7 +173,13 @@ impl Interpolator {
 	/// - [`Error::NonFiniteResult`]: extrapolation overflowed.
 	/// - [`Error::GpuUnavailable`] / [`Error::Gpu`]: on [`Backend::Gpu`] only.
 	pub fn run(&self, points: &[Point], start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Interpolation<BigDecimal>> {
-		self.run_generic(points.len(), |i| points[i].timestamp, |i| &points[i].value, start, end)
+		self.run_points(points, start, end, true)
+	}
+
+	/// [`run`](Self::run); `auto_gpu` false bars [`Backend::Auto`] from the GPU, as for a
+	/// job spawned before the GPU started.
+	pub(crate) fn run_points(&self, points: &[Point], start: DateTime<Utc>, end: DateTime<Utc>, auto_gpu: bool) -> Result<Interpolation<BigDecimal>> {
+		self.run_generic(points.len(), |i| points[i].timestamp, |i| &points[i].value, (start, end), auto_gpu)
 	}
 
 	/// [`run`](Self::run) for `f64` samples given as parallel columns, skipping the
@@ -181,14 +190,19 @@ impl Interpolator {
 	/// As [`run`](Self::run), plus [`Error::LengthMismatch`] if the columns differ in
 	/// length; [`Error::ValueOutOfRange`] covers NaN and infinite inputs.
 	pub fn run_f64(&self, timestamps: &[DateTime<Utc>], values: &[f64], start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Interpolation<f64>> {
+		self.run_columns(timestamps, values, start, end, true)
+	}
+
+	/// [`run_f64`](Self::run_f64), with `auto_gpu` as for [`run_points`](Self::run_points).
+	pub(crate) fn run_columns(&self, timestamps: &[DateTime<Utc>], values: &[f64], start: DateTime<Utc>, end: DateTime<Utc>, auto_gpu: bool) -> Result<Interpolation<f64>> {
 		if timestamps.len() != values.len() {
 			return Err(Error::LengthMismatch { timestamps: timestamps.len(), values: values.len() });
 		}
-		self.run_generic(timestamps.len(), |i| timestamps[i], |i| &values[i], start, end)
+		self.run_generic(timestamps.len(), |i| timestamps[i], |i| &values[i], (start, end), auto_gpu)
 	}
 
-	/// The `len` samples `(timestamp(i), value(i))`, resampled.
-	fn run_generic<'a, V: Value>(&self, len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Interpolation<V>> {
+	/// The `len` samples `(timestamp(i), value(i))`, resampled onto `start..=end`.
+	fn run_generic<'a, V: Value>(&self, len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, (start, end): (DateTime<Utc>, DateTime<Utc>), auto_gpu: bool) -> Result<Interpolation<V>> {
 		self.spline.validate()?;
 		let grid = Grid::new(start, end, self.resolution)?;
 		if grid.len > self.max_points {
@@ -203,11 +217,11 @@ impl Interpolator {
 
 		let parallel = self.backend != Backend::Cpu;
 		let mut normalised = filled(grid.len, 0.0, parallel)?;
-		let run = self.compute(&knots, &grid, &method, &mut normalised)?;
+		let run = self.compute(&knots, &grid, &method, &mut normalised, auto_gpu)?;
 		assemble(&knots, &grid, &method, &normalised, run, spline, self.spline)
 	}
 
-	fn compute<V: Value>(&self, knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64]) -> Result<Run> {
+	fn compute<V: Value>(&self, knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64], auto_gpu: bool) -> Result<Run> {
 		let cpu = |backend: Backend, out: &mut [f64], gpu_fallback: Option<Error>| {
 			if backend == Backend::Cpu {
 				kernel::eval_serial(knots, grid, method, out);
@@ -228,7 +242,7 @@ impl Interpolator {
 		match self.backend {
 			Backend::Cpu | Backend::Parallel => Ok(cpu(self.backend, out, None)),
 			Backend::Gpu => gpu(out),
-			Backend::Auto => match crate::auto::choose(grid.len, self.precision) {
+			Backend::Auto => match crate::auto::choose(grid.len, self.precision, auto_gpu) {
 				Backend::Gpu => match gpu(out) {
 					Ok(run) => Ok(run),
 					Err(e) => {
@@ -399,7 +413,8 @@ impl<V> Interpolation<V> {
 		self.requested
 	}
 
-	/// The backend that produced the values: `Cpu`, `Parallel` or `Gpu`, never `Auto`.
+	/// The backend that computed the values: `Cpu`, `Parallel` or `Gpu`, never `Auto`. Under
+	/// [`Backend::Auto`], a large input may still have been prepared on rayon's pool.
 	#[must_use]
 	pub const fn backend(&self) -> Backend {
 		self.backend
