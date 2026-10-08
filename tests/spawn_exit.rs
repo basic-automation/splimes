@@ -98,7 +98,9 @@ fn child(mode: &str, before: Duration, after: Duration) {
 		let release = Arc::new(Barrier::new(workers + 1));
 		for _ in 0..workers {
 			let release = Arc::clone(&release);
-			rayon::spawn(move || drop(release.wait()));
+			rayon::spawn(move || {
+				release.wait();
+			});
 		}
 		let future = interpolator.spawn_f64(ts, vs, epoch(), end);
 		splimes::prewarm_gpu().expect("the parent found a GPU");
