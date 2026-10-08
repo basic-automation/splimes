@@ -17,6 +17,11 @@ supported Rust version is a minor-version change.
   instead of twice. A million shuffled `BigDecimal` inputs prepare in 43 ms instead of
   368 ms on `Parallel`, and in 187 ms instead of 371 ms on `Cpu`, which stays on the
   calling thread ([BENCHMARKS.md](BENCHMARKS.md#preparing-input)). Results are unchanged.
+- **Faster CPU kernel.** When the knots and the grid lie within about 146 years of the
+  first knot (nearly every series), the CPU backends take their exact time differences
+  in `i64` rather than `i128`: 27–39% less time single-threaded and 14–27% on `Parallel`,
+  across methods ([BENCHMARKS.md](BENCHMARKS.md#methods)). Results are bit-identical, and
+  longer spans keep the `i128` path.
 
 ## [1.0.0] - 2026-10-05
 

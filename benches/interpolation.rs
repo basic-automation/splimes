@@ -60,7 +60,7 @@ fn backends(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Each method on rayon's pool, 1 Mi points.
+/// Each method on rayon's pool and on one thread, 1 Mi points.
 fn methods(c: &mut Criterion) {
 	let mut group = c.benchmark_group("methods");
 	group.sample_size(10);
@@ -69,6 +69,8 @@ fn methods(c: &mut Criterion) {
 	for spline in [Spline::Linear, Spline::Quadratic, Spline::Cubic, Spline::Polynomial(5, None), Spline::Polynomial(8, None)] {
 		let interpolator = Interpolator::new(spline, Resolution::Milliseconds).backend(Backend::Parallel);
 		group.bench_function(spline.to_string(), |b| b.iter(|| black_box(interpolator.run_f64(&s.timestamps, &s.values, s.start, s.end).expect("runs"))));
+		let interpolator = interpolator.backend(Backend::Cpu);
+		group.bench_function(format!("cpu/{spline}"), |b| b.iter(|| black_box(interpolator.run_f64(&s.timestamps, &s.values, s.start, s.end).expect("runs"))));
 	}
 	group.finish();
 }

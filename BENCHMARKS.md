@@ -95,6 +95,22 @@ Consecutive grid points that share a window reuse its Lagrange weights; each poi
 takes its `degree + 1` time differences exactly, from integer nanoseconds, which is what
 keeps the error bound independent of how the knots are spaced.
 
+Since 1.0.0, when the knots and the grid all lie within about 146 years (2⁶² ns) of the
+first knot, which is nearly every series, those differences are taken in `i64` instead of
+`i128`, with bit-identical results. Same benchmark, before (`main`) and after, in one
+session, criterion medians:
+
+| Method | `Parallel` before | `Parallel` after | `Cpu` before | `Cpu` after |
+|--------|-------:|------:|-------:|------:|
+| `Linear` | 5.79 ms | 4.85 ms | 25.5 ms | 17.7 ms |
+| `Quadratic` | 6.44 ms | 5.58 ms | 34.0 ms | 24.9 ms |
+| `Cubic` | 7.72 ms | 6.14 ms | 39.3 ms | 27.0 ms |
+| `Polynomial(5, None)` | 8.97 ms | 6.77 ms | 56.7 ms | 36.4 ms |
+| `Polynomial(8, None)` | 10.7 ms | 8.37 ms | 81.3 ms | 49.6 ms |
+
+Measured 2026-10-08 on the machine above with rustc 1.99.0 (stable), otherwise idle.
+`cargo bench --bench interpolation -- methods` reproduces it (the `cpu/` rows are `Cpu`).
+
 ## `BigDecimal` at the edges
 
 The same cubic interpolation through `run` (`BigDecimal` in and out) and `run_f64`,
