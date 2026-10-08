@@ -111,9 +111,10 @@
 //! [`Backend::Gpu`] returns the error. splimes never opens the device on a thread of its
 //! own: a process exiting while a driver initialises on another thread can crash.
 //!
-//! All entry points are synchronous and CPU- or GPU-bound. From async code, use the
-//! `tokio` feature's `Interpolator::run_async`, or your runtime's equivalent of
-//! `spawn_blocking`.
+//! All entry points are synchronous and CPU- or GPU-bound. From async code, use
+//! [`Interpolator::spawn`], which runs the work on rayon's pool and returns a future any
+//! executor can await, the `tokio` feature's `Interpolator::run_async` (tokio's blocking
+//! pool), or your runtime's equivalent of `spawn_blocking`.
 //!
 //! # Features
 //!
@@ -147,6 +148,7 @@ pub use gpu::{GpuConfig, GpuInfo, GpuPoolStats, configure_gpu, gpu_config, gpu_i
 pub use interpolation::{Backend, Interpolation, Interpolator, Precision, interpolate};
 pub use point::{Point, PointKind};
 pub use resolution::Resolution;
+pub use spawn::InterpolationFuture;
 pub use spline::{MAX_POLYNOMIAL_DEGREE, Spline};
 pub use value::Value;
 
@@ -161,6 +163,7 @@ mod kernel;
 mod point;
 mod prepare;
 mod resolution;
+mod spawn;
 mod spline;
 mod time;
 mod value;

@@ -287,6 +287,37 @@ async fn async_wrappers_run_off_the_executor() {
 	assert!(during_f64 > 100, "run_f64_async blocked the executor: {during_f64} ticks");
 }
 
+/// `spawn` needs no feature and no particular runtime: here, on a single-threaded tokio
+/// runtime, another task keeps running while it computes, and the result is `run`'s.
+#[tokio::test(flavor = "current_thread")]
+async fn spawned_interpolations_run_off_the_executor() {
+	use std::sync::{
+		Arc, atomic::{AtomicBool, AtomicU64, Ordering}
+	};
+	let ticks = Arc::new(AtomicU64::new(0));
+	let done = Arc::new(AtomicBool::new(false));
+	let ticker = {
+		let (ticks, done) = (Arc::clone(&ticks), Arc::clone(&done));
+		tokio::spawn(async move {
+			while !done.load(Ordering::Relaxed) {
+				ticks.fetch_add(1, Ordering::Relaxed);
+				tokio::task::yield_now().await;
+			}
+		})
+	};
+	let input = points(&[(0, "0"), (100, "100")]);
+	let interpolator = Interpolator::new(Spline::Linear, Resolution::Microseconds).backend(Backend::Cpu);
+	let out = interpolator.spawn(input.clone(), at(0), at(10)).await.expect("runs");
+	assert_eq!(out.len(), 10_000_001);
+	assert_eq!(out.values()[5_000_000], dec("5"));
+	let during = ticks.load(Ordering::Relaxed);
+	assert!(during > 100, "spawn blocked the executor: {during} ticks");
+	let out = interpolator.spawn_f64(vec![at(0), at(100)], vec![0.0, 100.0], at(0), at(10)).await.expect("runs");
+	assert_eq!(out.values()[3_000_000], 3.0);
+	done.store(true, Ordering::Relaxed);
+	ticker.await.expect("ticker");
+}
+
 /// Every input value must be finite, even one a later duplicate replaces.
 #[test]
 fn bad_values_are_refused_wherever_they_are() {

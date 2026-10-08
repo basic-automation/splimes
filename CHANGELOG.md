@@ -10,6 +10,15 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Added
+
+- `Interpolator::spawn` and `Interpolator::spawn_f64`: start an interpolation on
+  rayon's pool and get an `InterpolationFuture` that any executor can await (tokio,
+  async-std, smol, `futures`), with no feature flag and no new dependency. A panic in
+  the work becomes `Error::Task` instead of aborting.
+- `Error::Task` no longer requires the `tokio` feature: `InterpolationFuture` reports
+  through it too.
+
 ### Changed
 
 - **Faster input preparation.** Every backend except `Cpu` now converts and sorts inputs

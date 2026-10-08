@@ -89,8 +89,10 @@ assert_eq!(series.spline(), Spline::Quadratic);
 # Ok::<(), splimes::Error>(())
 ```
 
-From async code, enable the `tokio` feature and call `run_async`, which runs the work
-on tokio's blocking pool.
+From async code, `spawn` (or `spawn_f64`) runs the work on rayon's pool and returns a
+future that any executor can await, with no feature flag:
+`interpolator.spawn(points, start, end).await?`. With the `tokio` feature, `run_async`
+uses tokio's blocking pool instead.
 
 ## Accuracy
 

@@ -111,9 +111,10 @@ pub enum Error {
 		input: String,
 	},
 
-	/// The blocking task running an async interpolation panicked or was cancelled.
-	#[cfg(feature = "tokio")]
-	#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
+	/// The task running an interpolation for async code failed: the interpolation
+	/// panicked (a bug), tokio cancelled its blocking task
+	/// (`Interpolator::run_async`), or an
+	/// [`InterpolationFuture`](crate::InterpolationFuture) was polled after it completed.
 	#[error("interpolation task failed: {0}")]
 	Task(String),
 }
