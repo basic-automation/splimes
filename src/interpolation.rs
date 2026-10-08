@@ -91,7 +91,7 @@ impl fmt::Display for Precision {
 pub struct Interpolator {
 	spline: Spline,
 	resolution: Resolution,
-	backend: Backend,
+	pub(crate) backend: Backend,
 	precision: Precision,
 	exact: bool,
 	max_points: usize,
