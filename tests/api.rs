@@ -182,6 +182,45 @@ fn cpu_and_parallel_are_bit_identical() {
 	}
 }
 
+/// Large shuffled input with duplicates takes the parallel preparation path on every
+/// backend but `Cpu`; the results are the same, bit for bit.
+#[test]
+fn parallel_preparation_changes_nothing() {
+	let n: i64 = 50_000;
+	// An odd multiplier permutes 0..n when n is coprime to it; every instant appears twice.
+	let shuffled = |i: i64| (i * 7_919) % n;
+	let points: Vec<Point> = (0..2 * n).map(|i| Point::new(at(shuffled(i % n) * 2), format!("{}", (i as f64 * 0.37).sin()).parse().expect("decimal"))).collect();
+	for spline in [Spline::Linear, Spline::Cubic, Spline::Polynomial(6, Some(0.5))] {
+		let make = |backend| Interpolator::new(spline, Resolution::Seconds).backend(backend);
+		let cpu = make(Backend::Cpu).run(&points, at(-10), at(2 * n + 10)).expect("cpu");
+		let parallel = make(Backend::Parallel).run(&points, at(-10), at(2 * n + 10)).expect("parallel");
+		assert_eq!(cpu.values(), parallel.values(), "{spline}");
+		assert_eq!(cpu.kinds(), parallel.kinds(), "{spline}");
+		assert_eq!(cpu.kinds().iter().filter(|k| **k == PointKind::Raw).count(), usize::try_from(n).expect("small"));
+	}
+}
+
+/// The kernel takes time differences in `i64` when every knot and grid point is within
+/// about 146 years of the first knot, and in `i128` otherwise. The same instants get the
+/// same values either way.
+#[test]
+fn the_i64_and_i128_paths_agree() {
+	let year = TimeDelta::days(365);
+	// Forty knots over forty years, irregular.
+	let points: Vec<Point> = (0..40).map(|i: i32| Point::new(at(0) + year * i + TimeDelta::seconds(i64::from(i * i) * 86_413), format!("{}", f64::from(i).cos() * 10.0).parse().expect("decimal"))).collect();
+	for spline in [Spline::Linear, Spline::Quadratic, Spline::Cubic, Spline::Polynomial(8, None)] {
+		for backend in [Backend::Cpu, Backend::Parallel] {
+			let make = Interpolator::new(spline, Resolution::Days).backend(backend);
+			// A grid over the data (i64), and one running 300 years past it (i128).
+			let near = make.run(&points, at(0) - year * 2, at(0) + year * 42).expect("near");
+			let far = make.run(&points, at(0) - year * 2, at(0) + year * 300).expect("far");
+			assert!(far.len() > near.len());
+			assert_eq!(near.values(), &far.values()[..near.len()], "{spline} {backend}");
+			assert_eq!(near.kinds(), &far.kinds()[..near.len()], "{spline} {backend}");
+		}
+	}
+}
+
 #[test]
 fn f64_and_bigdecimal_apis_agree() {
 	let input = points(&[(0, "1.5"), (3, "-2"), (7, "4.25"), (12, "0")]);

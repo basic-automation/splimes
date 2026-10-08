@@ -93,6 +93,7 @@ change to what any method computes.
 - [x] **GPU time at the extremes of chrono's range** (`tests/gpu.rs`): knots spanning all ~524,000 years, and microsecond knots a second before `DateTime::MAX_UTC` beside one at `MIN_UTC`, match the CPU in `f64` and `f32` (with the `f32` windows handed to `f64`). Until now, a kernel that dropped the 96-bit time's high word passed every test
 - [x] **Text and serde round trips of `Spline`** (`tests/api.rs`): every degree with ~500 random bounds factors (subnormal, `f64::MAX`, `-0.0`) through `Display`/`FromStr` and serde_json, bit for bit, and malformed text refused. It found that serde_json's default float parser reads some bounds factors back an ulp off (e.g. `1.5259628951211795e-293`); exact with its `float_roundtrip` feature, which the tests now enable and the `Spline` docs recommend
 - [x] **`spawn` on the GPU** (`tests/gpu.rs`): sixteen `Backend::Gpu` futures in flight at once on rayon's pool, awaited on one thread, each matching the CPU
+- [x] **This release's fast paths change nothing** (`tests/api.rs`): 100,000 shuffled inputs with every instant duplicated give bit-identical results on `Cpu` (serial preparation) and `Parallel` (parallel); a 300-year grid (the `i128` kernel) and a 44-year one (`i64`) give bit-identical values at their shared instants
 - [ ] WeftDB persists `Spline`: if it stores it as JSON through serde_json, enable serde_json's `float_roundtrip` feature there, or a stored `Polynomial` bounds factor can come back an ulp off *(owner: WeftDB repository)*
 
 ---
