@@ -28,9 +28,10 @@ impl Interpolator {
 	///   Call [`prewarm_gpu`](crate::prewarm_gpu) at startup to pay that up front.
 	/// - Called from a rayon worker, `spawn` runs the interpolation there and then, as
 	///   [`run`](Self::run) would, and returns a future that is already complete. Queued
-	///   on the pool instead, it could wait behind the very worker blocked on it. (Blocking
-	///   a rayon worker on a future spawned elsewhere can still deadlock the pool if every
-	///   worker does it: await futures off the pool.)
+	///   on the pool instead, it could wait behind the very worker blocked on it. Don't
+	///   block a rayon worker on a future spawned elsewhere either: rayon may run the
+	///   blocking task on a worker in the middle of that very job, which then never
+	///   finishes, even with the rest of the pool idle. Await futures off the pool.
 	///
 	/// With the `tokio` feature, `Interpolator::run_async` uses tokio's blocking pool
 	/// instead, which the runtime waits for when it shuts down.
@@ -48,11 +49,13 @@ impl Interpolator {
 	/// (`main` returning, or a runtime shutting down and dropping its tasks). Don't drop one
 	/// while holding a lock that rayon work takes, or on a thread that rayon work waits for.
 	///
-	/// Two cases don't wait, so the process mustn't end while their GPU work runs: a drop on
-	/// a rayon worker, which could be the very worker running the job, and a future never
-	/// dropped because the process ends first, as with `std::process::exit` or a runtime
-	/// that abandons its tasks (tokio's `shutdown_background` and `shutdown_timeout`). Await
-	/// or drop GPU futures off rayon's pool, and let them finish before such an exit.
+	/// The process mustn't end while GPU work runs that nothing waits for: after a drop on a
+	/// rayon worker, which doesn't wait because it could be the very worker running the
+	/// job; after a drop the process itself doesn't wait for, as when a runtime stops
+	/// waiting for its tasks (tokio's `shutdown_background`, or `shutdown_timeout` with a
+	/// timeout shorter than the work); or when the future is never dropped, as with
+	/// `std::process::exit`. Await or drop GPU futures off rayon's pool, and let them finish
+	/// before such an exit.
 	///
 	/// ```
 	/// use bigdecimal::BigDecimal;
@@ -87,8 +90,8 @@ impl Interpolator {
 	/// completed.
 	#[must_use = "dropping the future cancels the interpolation if it hasn't started"]
 	pub fn spawn(self, points: Vec<Point>, start: DateTime<Utc>, end: DateTime<Utc>) -> InterpolationFuture<BigDecimal> {
-		let (this, gpu) = self.for_spawn();
-		InterpolationFuture::spawn(gpu, move || this.run(&points, start, end))
+		let (auto_gpu, gpu) = self.for_spawn();
+		InterpolationFuture::spawn(gpu, move || self.run_points(&points, start, end, auto_gpu))
 	}
 
 	/// [`spawn`](Self::spawn) for [`run_f64`](Self::run_f64).
@@ -99,12 +102,13 @@ impl Interpolator {
 	/// for [`spawn`](Self::spawn).
 	#[must_use = "dropping the future cancels the interpolation if it hasn't started"]
 	pub fn spawn_f64(self, timestamps: Vec<DateTime<Utc>>, values: Vec<f64>, start: DateTime<Utc>, end: DateTime<Utc>) -> InterpolationFuture<f64> {
-		let (this, gpu) = self.for_spawn();
-		InterpolationFuture::spawn(gpu, move || this.run_f64(&timestamps, &values, start, end))
+		let (auto_gpu, gpu) = self.for_spawn();
+		InterpolationFuture::spawn(gpu, move || self.run_columns(&timestamps, &values, start, end, auto_gpu))
 	}
 
-	/// Readies this interpolator to run as a spawned job, and says whether the GPU may
-	/// compute it, which decides whether dropping the future waits.
+	/// Readies this interpolator to run as a spawned job: whether an [`Backend::Auto`] job
+	/// may use the GPU, and whether the GPU may compute it, which decides whether dropping
+	/// the future waits.
 	///
 	/// With [`Backend::Gpu`](crate::Backend::Gpu), opens the device here, on the calling
 	/// thread, if no call has yet: a process exiting while a driver initialises on a thread
@@ -113,19 +117,18 @@ impl Interpolator {
 	/// may use the GPU only if it has started by now. Settling that here, rather than when
 	/// the job picks its backend, keeps the drop and the job agreed: an `Auto` job picks
 	/// late, and the GPU could start after its future was dropped without waiting.
-	fn for_spawn(mut self) -> (Self, bool) {
-		let gpu = match self.backend {
+	fn for_spawn(&self) -> (bool, bool) {
+		match self.backend {
 			Backend::Gpu => {
 				let _ = crate::prewarm_gpu();
-				true
+				(true, true)
 			}
 			Backend::Auto => {
-				self.auto_gpu = crate::gpu::started();
-				self.auto_gpu
+				let started = crate::gpu::started();
+				(started, started)
 			}
-			_ => false,
-		};
-		(self, gpu)
+			_ => (true, false),
+		}
 	}
 }
 
@@ -446,17 +449,14 @@ mod tests {
 	#[test]
 	fn whether_the_gpu_may_compute_a_spawned_job_is_settled_at_spawn() {
 		let interpolator = Interpolator::new(Spline::Linear, Resolution::Seconds);
-		assert!(interpolator.backend(Backend::Gpu).for_spawn().1);
-		assert!(!interpolator.backend(Backend::Parallel).for_spawn().1);
-		assert!(!interpolator.backend(Backend::Cpu).for_spawn().1);
+		assert_eq!(interpolator.backend(Backend::Gpu).for_spawn(), (true, true));
+		assert_eq!(interpolator.backend(Backend::Parallel).for_spawn(), (true, false));
+		assert_eq!(interpolator.backend(Backend::Cpu).for_spawn(), (true, false));
 		// Auto may use the GPU only if it had started, and the job is told so.
-		let (job, gpu) = interpolator.for_spawn();
-		assert_eq!(gpu, crate::gpu::started());
-		assert_eq!(job.auto_gpu, gpu);
+		let started = crate::gpu::started();
+		assert_eq!(interpolator.for_spawn(), (started, started));
 		let _ = crate::prewarm_gpu();
-		let (job, gpu) = interpolator.for_spawn();
-		assert_eq!(gpu, cfg!(feature = "gpu"));
-		assert_eq!(job.auto_gpu, gpu);
+		assert_eq!(interpolator.for_spawn(), (cfg!(feature = "gpu"), cfg!(feature = "gpu")));
 		// A job barred from the GPU never picks it, however large.
 		assert_ne!(crate::auto::choose(usize::MAX, crate::Precision::F64, false), Backend::Gpu);
 	}
