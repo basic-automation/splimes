@@ -90,6 +90,7 @@ Additive work on the 1.0 contract: more evidence for what is already promised, a
 change to what any method computes.
 
 - [x] **Randomised property tests of the input contract** on every backend and precision (`tests/properties.rs`): 1,024 generated series, unsorted with duplicate instants, single points, constant values and decimals beyond `f64`'s digits, checked for order independence (bit for bit), provenance labels and raw values (every digit), the reported step-down and `exact(true)`, the grid's shape, `run`/`run_f64` agreement and the published bound against the exact reference
+- [x] **GPU time at the extremes of chrono's range** (`tests/gpu.rs`): knots spanning all ~524,000 years, and microsecond knots a second before `DateTime::MAX_UTC` beside one at `MIN_UTC`, match the CPU in `f64` and `f32` (with the `f32` windows handed to `f64`). Until now, a kernel that dropped the 96-bit time's high word passed every test
 
 ---
 

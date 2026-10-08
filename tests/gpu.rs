@@ -219,3 +219,46 @@ fn gpu_non_finite_results_name_the_first_point() {
 		assert_eq!(run(Backend::Gpu, precision), cpu, "{precision}");
 	}
 }
+
+/// Times are 96-bit integers on the GPU: knots spanning the whole of chrono's range, and
+/// microsecond spacing at its far end, compute as they do on the CPU.
+#[test]
+fn extreme_time_ranges_match_the_cpu() {
+	let Some((info, _serial)) = gpu("extreme_time_ranges_match_the_cpu") else { return };
+	let (min, max) = (DateTime::<Utc>::MIN_UTC, DateTime::<Utc>::MAX_UTC);
+	let span = max - min;
+	// Seven knots spread over about 524,000 years, resampled yearly across all of them.
+	let ts: Vec<DateTime<Utc>> = (0..7).map(|i| min + span / 6 * i).collect();
+	let vs: Vec<f64> = (0..7).map(|i| (f64::from(i) * 0.9).sin()).collect();
+	// One knot at the start of time, then a thousand a microsecond apart, ending a second
+	// before chrono's last instant: every local difference is microseconds, taken between
+	// offsets near 2⁷³ ns.
+	let far_end = max - TimeDelta::seconds(1);
+	let mut dense = vec![min];
+	dense.extend((0..1_000).rev().map(|i| far_end - TimeDelta::microseconds(i)));
+	let dense_values: Vec<f64> = (0..dense.len()).map(|i| (i as f64 * 0.01).cos()).collect();
+	let cases = [(&ts, &vs, ts[0], ts[6], Resolution::Years), (&dense, &dense_values, far_end - TimeDelta::microseconds(600), far_end + TimeDelta::microseconds(3), Resolution::Nanoseconds)];
+	for (k, (ts, vs, start, end, resolution)) in cases.into_iter().enumerate() {
+		for spline in [Spline::Linear, Spline::Cubic, Spline::Polynomial(5, Some(0.5))] {
+			let make = |backend, precision| Interpolator::new(spline, resolution).backend(backend).gpu_precision(precision);
+			let cpu = make(Backend::Cpu, Precision::F64).run_f64(ts, vs, start, end).expect("cpu");
+			assert!(cpu.len() > 500, "case {k}: {} grid points", cpu.len());
+			for precision in precisions(&info) {
+				let gpu = make(Backend::Gpu, precision).run_f64(ts, vs, start, end).expect("gpu");
+				assert_eq!(gpu.backend(), Backend::Gpu);
+				assert_eq!(gpu.kinds(), cpu.kinds(), "case {k} {spline} {precision}");
+				// Values lie in [-1, 1] and these windows are well conditioned, so the published
+				// bound is about this in absolute terms.
+				let tolerance = if precision == Precision::F64 { 1e-12 } else { 2e-5 };
+				for (i, (g, c)) in gpu.values().iter().zip(cpu.values()).enumerate() {
+					assert!((g - c).abs() <= tolerance, "case {k} {spline} {precision} point {i}: gpu {g} vs cpu {c}");
+				}
+				if precision == Precision::F32 && k == 1 {
+					// Microsecond gaps beside a 524,000-year one are far outside what f32 can
+					// span, so those windows must have been recomputed in f64.
+					assert!(gpu.points_recomputed_in_f64() > 0, "{spline}");
+				}
+			}
+		}
+	}
+}
