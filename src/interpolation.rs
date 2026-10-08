@@ -98,6 +98,9 @@ pub struct Interpolator {
 	precision: Precision,
 	exact: bool,
 	max_points: usize,
+	/// Whether [`Backend::Auto`] may use the GPU: false for an `Auto` job spawned before the
+	/// GPU had started (see `spawn`).
+	pub(crate) auto_gpu: bool,
 }
 
 impl Interpolator {
@@ -105,7 +108,7 @@ impl Interpolator {
 	/// [`Precision::F64`], stepping the method down when there are too few points.
 	#[must_use]
 	pub const fn new(spline: Spline, resolution: Resolution) -> Self {
-		Self { spline, resolution, backend: Backend::Auto, precision: Precision::F64, exact: false, max_points: usize::MAX }
+		Self { spline, resolution, backend: Backend::Auto, precision: Precision::F64, exact: false, max_points: usize::MAX, auto_gpu: true }
 	}
 
 	/// Where to run.
@@ -231,7 +234,7 @@ impl Interpolator {
 		match self.backend {
 			Backend::Cpu | Backend::Parallel => Ok(cpu(self.backend, out, None)),
 			Backend::Gpu => gpu(out),
-			Backend::Auto => match crate::auto::choose(grid.len, self.precision) {
+			Backend::Auto => match crate::auto::choose(grid.len, self.precision, self.auto_gpu) {
 				Backend::Gpu => match gpu(out) {
 					Ok(run) => Ok(run),
 					Err(e) => {

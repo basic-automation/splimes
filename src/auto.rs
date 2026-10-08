@@ -90,13 +90,16 @@ thread_local! {
 }
 
 /// The backend `Auto` runs a call with `points` grid points on.
-pub fn choose(points: usize, precision: Precision) -> Backend {
+///
+/// `gpu`: whether the GPU may be used at all (false for an `Auto` job spawned before the
+/// GPU had started; see `Interpolator::spawn`).
+pub fn choose(points: usize, precision: Precision, gpu: bool) -> Backend {
 	#[cfg(test)]
 	if FORCE_GPU.get() {
 		return Backend::Gpu;
 	}
 	let t = auto_thresholds();
-	if points >= t.gpu_min_points_for(precision) && crate::gpu::ready(precision) {
+	if gpu && points >= t.gpu_min_points_for(precision) && crate::gpu::ready(precision) {
 		Backend::Gpu
 	} else if points >= t.parallel_min_points {
 		Backend::Parallel
