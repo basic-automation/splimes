@@ -24,7 +24,7 @@ impl Interpolator {
 	/// [`prewarm_gpu`](crate::prewarm_gpu) at startup to keep driver initialisation on a
 	/// thread you control.
 	///
-	/// With the `tokio` feature, [`run_async`](Self::run_async) uses tokio's blocking pool
+	/// With the `tokio` feature, `Interpolator::run_async` uses tokio's blocking pool
 	/// instead.
 	///
 	/// ```
