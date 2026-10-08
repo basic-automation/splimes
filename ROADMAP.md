@@ -88,7 +88,7 @@ the published crate and is in progress.
 
 Published to crates.io from the `v1.1.0` tag by trusted publishing, from [#3](https://github.com/basic-automation/splimes/pull/3) and [#4](https://github.com/basic-automation/splimes/pull/4). It shipped `Interpolator::spawn` / `spawn_f64` with GPU-safe drop and exit, parallel input preparation, the `i64` kernel and cheaper output timestamps (the items marked 1.1.0 under "Later" below), and the hardening tests ticked under "1.x" below. What each method computes is unchanged: the release run's conformance tables on CI's three adapters match 1.0.0's digit for digit (BENCHMARKS.md).
 
-- [x] Merged #3 (the daily routine's run) and released only after review: #3 was merged with a `spawn` crash at exit, and #4 fixed it over three adversarial review rounds before the tag. Review routine PRs before merging them
+- [x] Merged [#3](https://github.com/basic-automation/splimes/pull/3) (the daily routine's run) and released only after review: #3 was merged with a `spawn` crash at exit, and [#4](https://github.com/basic-automation/splimes/pull/4) fixed it over three adversarial review rounds before the tag. Review routine PRs before merging them
 
 ---
 

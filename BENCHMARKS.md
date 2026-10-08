@@ -207,7 +207,8 @@ sparse series, and geometric gaps — each on five grids: across both edges (two
 spacings out), the middle, the densest stretch, and 100 edge spacings out. CI prints the
 same report on every run: for lavapipe (f64 and f32), which the Linux job requires, and
 for the Windows and macOS runners' adapters (WARP and Metal, f32) when they expose one.
-The 1.0.0 and 1.1.0 release runs' results, identical, are [below](#ci-runners).
+The tables both release runs printed, 1.0.0's and 1.1.0's, identical, are
+[below](#ci-runners).
 
 **CPU** (`Cpu` and `Parallel`) and **NVIDIA RTX 4070 Ti SUPER, f64**:
 
