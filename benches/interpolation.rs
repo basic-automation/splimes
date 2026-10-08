@@ -60,7 +60,7 @@ fn backends(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Each method on rayon's pool, 1 Mi points.
+/// Each method on rayon's pool and on one thread, 1 Mi points.
 fn methods(c: &mut Criterion) {
 	let mut group = c.benchmark_group("methods");
 	group.sample_size(10);
@@ -69,6 +69,8 @@ fn methods(c: &mut Criterion) {
 	for spline in [Spline::Linear, Spline::Quadratic, Spline::Cubic, Spline::Polynomial(5, None), Spline::Polynomial(8, None)] {
 		let interpolator = Interpolator::new(spline, Resolution::Milliseconds).backend(Backend::Parallel);
 		group.bench_function(spline.to_string(), |b| b.iter(|| black_box(interpolator.run_f64(&s.timestamps, &s.values, s.start, s.end).expect("runs"))));
+		let interpolator = interpolator.backend(Backend::Cpu);
+		group.bench_function(format!("cpu/{spline}"), |b| b.iter(|| black_box(interpolator.run_f64(&s.timestamps, &s.values, s.start, s.end).expect("runs"))));
 	}
 	group.finish();
 }
@@ -101,6 +103,29 @@ fn inputs(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Preparing a million inputs (sorting, de-duplicating, converting) for a one-point grid,
+/// so preparation is the whole cost: in order and shuffled, `f64` and `BigDecimal`.
+fn prepare(c: &mut Criterion) {
+	let mut group = c.benchmark_group("prepare");
+	group.sample_size(10);
+	let knots = 1_i64 << 20;
+	let s = series(knots, 1 << 20);
+	// An odd multiplier permutes indices modulo a power of two.
+	let shuffle = |i: usize| (i * 7_919) % s.timestamps.len();
+	let shuffled = Series { timestamps: (0..s.timestamps.len()).map(|i| s.timestamps[shuffle(i)]).collect(), values: (0..s.values.len()).map(|i| s.values[shuffle(i)]).collect(), start: s.start, end: s.end };
+	let decimal: Vec<Point> = shuffled.timestamps.iter().zip(&shuffled.values).map(|(&t, v)| Point::new(t, format!("{v:e}").parse::<BigDecimal>().expect("finite"))).collect();
+	let middle = s.start + (s.end - s.start) / 2;
+	group.throughput(Throughput::Elements(knots as u64));
+	for backend in [Backend::Cpu, Backend::Parallel] {
+		let interpolator = Interpolator::new(Spline::Cubic, Resolution::Milliseconds).backend(backend);
+		for (name, series) in [("f64-sorted", &s), ("f64-shuffled", &shuffled)] {
+			group.bench_with_input(BenchmarkId::new(format!("{backend}/{name}"), knots), series, |b, s| b.iter(|| black_box(interpolator.run_f64(&s.timestamps, &s.values, middle, middle).expect("runs"))));
+		}
+		group.bench_with_input(BenchmarkId::new(format!("{backend}/BigDecimal-shuffled"), knots), &decimal, |b, d| b.iter(|| black_box(interpolator.run(d, middle, middle).expect("runs"))));
+	}
+	group.finish();
+}
+
 /// Small calls, where fixed overhead dominates: Auto's choice for a typical query.
 fn small(c: &mut Criterion) {
 	let mut group = c.benchmark_group("small");
@@ -113,5 +138,5 @@ fn small(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, backends, methods, bigdecimal, inputs, small);
+criterion_group!(benches, backends, methods, bigdecimal, inputs, prepare, small);
 criterion_main!(benches);

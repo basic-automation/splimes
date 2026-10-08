@@ -19,9 +19,10 @@ pub enum Backend {
 	/// reported by [`Interpolation::gpu_fallback`]. See [`AutoThresholds`](crate::AutoThresholds).
 	#[default]
 	Auto,
-	/// The calling thread only.
+	/// The calling thread only, including preparing the input.
 	Cpu,
-	/// rayon's global thread pool.
+	/// rayon's global thread pool. Every backend but `Cpu` also prepares large inputs
+	/// (16 Ki points or more) there.
 	Parallel,
 	/// The GPU, via wgpu. Fails with [`Error::GpuUnavailable`] or [`Error::Gpu`] instead of
 	/// falling back.
@@ -169,7 +170,7 @@ impl Interpolator {
 	/// - [`Error::NonFiniteResult`]: extrapolation overflowed.
 	/// - [`Error::GpuUnavailable`] / [`Error::Gpu`]: on [`Backend::Gpu`] only.
 	pub fn run(&self, points: &[Point], start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Interpolation<BigDecimal>> {
-		self.run_generic(points.iter().map(|p| p.timestamp), points.iter().map(|p| &p.value), start, end)
+		self.run_generic(points.len(), |i| points[i].timestamp, |i| &points[i].value, start, end)
 	}
 
 	/// [`run`](Self::run) for `f64` samples given as parallel columns, skipping the
@@ -183,16 +184,17 @@ impl Interpolator {
 		if timestamps.len() != values.len() {
 			return Err(Error::LengthMismatch { timestamps: timestamps.len(), values: values.len() });
 		}
-		self.run_generic(timestamps.iter().copied(), values.iter(), start, end)
+		self.run_generic(timestamps.len(), |i| timestamps[i], |i| &values[i], start, end)
 	}
 
-	fn run_generic<'a, V: Value>(&self, timestamps: impl ExactSizeIterator<Item = DateTime<Utc>>, values: impl ExactSizeIterator<Item = &'a V>, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Interpolation<V>> {
+	/// The `len` samples `(timestamp(i), value(i))`, resampled.
+	fn run_generic<'a, V: Value>(&self, len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Interpolation<V>> {
 		self.spline.validate()?;
 		let grid = Grid::new(start, end, self.resolution)?;
 		if grid.len > self.max_points {
 			return Err(Error::OutputTooLarge { points: grid.len as u128 });
 		}
-		let knots = Knots::new(timestamps, values)?;
+		let knots = Knots::new(len, timestamp, value, self.backend != Backend::Cpu)?;
 		let spline = self.spline.fallback_for(knots.len());
 		if self.exact && knots.len() < self.spline.min_points() {
 			return Err(Error::InsufficientPoints { spline: self.spline, required: self.spline.min_points(), available: knots.len() });

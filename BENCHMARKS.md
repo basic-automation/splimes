@@ -95,6 +95,38 @@ Consecutive grid points that share a window reuse its Lagrange weights; each poi
 takes its `degree + 1` time differences exactly, from integer nanoseconds, which is what
 keeps the error bound independent of how the knots are spaced.
 
+Since 1.0.0, when the knots and the grid all lie within about 146 years (2⁶² ns) of the
+first knot, which is nearly every series, those differences are taken in `i64` instead of
+`i128`, with bit-identical results. Same benchmark, before (`main`) and after, in one
+session, criterion medians:
+
+| Method | `Parallel` before | `Parallel` after | `Cpu` before | `Cpu` after |
+|--------|-------:|------:|-------:|------:|
+| `Linear` | 5.79 ms | 4.85 ms | 25.5 ms | 17.7 ms |
+| `Quadratic` | 6.44 ms | 5.58 ms | 34.0 ms | 24.9 ms |
+| `Cubic` | 7.72 ms | 6.14 ms | 39.3 ms | 27.0 ms |
+| `Polynomial(5, None)` | 8.97 ms | 6.77 ms | 56.7 ms | 36.4 ms |
+| `Polynomial(8, None)` | 10.7 ms | 8.37 ms | 81.3 ms | 49.6 ms |
+
+Measured 2026-10-08 on the machine above with rustc 1.99.0 (stable), otherwise idle.
+`cargo bench --bench interpolation -- methods` reproduces it (the `cpu/` rows are `Cpu`).
+
+Building the output itself got cheaper too: each output timestamp used to cost a
+`checked_add_signed` in chrono, about 10 ns; it is now built from integer POSIX seconds
+on a calendar date computed once per day, giving the same instants. Starting from the
+"after" column above, same conditions:
+
+| Method | `Parallel` before | `Parallel` after | `Cpu` before | `Cpu` after |
+|--------|-------:|------:|-------:|------:|
+| `Linear` | 5.03 ms | 4.76 ms | 18.0 ms | 13.2 ms |
+| `Cubic` | 6.70 ms | 5.93 ms | 27.5 ms | 24.1 ms |
+| `Polynomial(8, None)` | 10.1 ms | 8.24 ms | 49.7 ms | 46.4 ms |
+
+The 1 Mi-point `f64` call in [`BigDecimal` at the edges](#bigdecimal-at-the-edges) went
+from 6.98 to 5.52 ms. Two smaller cases moved within their noise: the 64 Ki-point
+`BigDecimal` call (3.77 → 4.00 ms, its `f64` twin ±11%) and the 60-point `Auto` call
+(10.4 → 10.6 µs).
+
 ## `BigDecimal` at the edges
 
 The same cubic interpolation through `run` (`BigDecimal` in and out) and `run_f64`,
@@ -121,8 +153,35 @@ Cubic, `Parallel`, 1,048,576 grid points. Criterion medians.
 
 The knot search is logarithmic, so input size barely matters until there are about as
 many inputs as grid points: then preparing the input (sorting, de-duplicating and
-normalising a million points, single-threaded) and a fresh window per grid point
-dominate.
+normalising a million points) and a fresh window per grid point dominate. (Measured on
+1.0.0, when preparation was single-threaded; see below.)
+
+## Preparing input
+
+Since 1.0.0, every backend but `Cpu` prepares inputs of 16 Ki points or more on rayon's
+pool, and converts each value to `f64` once instead of twice. A million inputs on a
+one-point grid, so preparation is the whole cost; "shuffled" is the same series in a
+scrambled order. Criterion medians, before (`main` at 1.0.0) and after, in one session.
+
+| 1,048,576 inputs | `Cpu` before | `Cpu` after | `Parallel` before | `Parallel` after |
+|------------------|-------:|------:|-------:|------:|
+| `f64`, in order | 22.4 ms | 16.2 ms | 21.3 ms | 13.9 ms |
+| `f64`, shuffled | 70.2 ms | 47.3 ms | 69.7 ms | 24.2 ms |
+| `BigDecimal`, shuffled | 371 ms | 187 ms | 368 ms | 43.4 ms |
+
+And the same change in whole calls, `Parallel` cubic as in [Input size](#input-size):
+
+| | Before | After |
+|-|-------:|------:|
+| 1,048,576 inputs, 1,048,576 grid points | 41.5 ms | 26.3 ms |
+| `Auto`, 32 `BigDecimal` inputs, 60 grid points | 16.8 µs | 12.4 µs |
+
+Measured 2026-10-08 on the machine above with rustc 1.99.0 (stable), otherwise idle (95%
+idle outside the benchmark's own threads). Results are unchanged, bit for bit.
+
+```bash
+cargo bench --bench interpolation -- "prepare|inputs|small"
+```
 
 ## Small calls
 
@@ -176,6 +235,14 @@ inputs inherits it. Λ is the honest yardstick.) The two-million-knot series is 
 | `Polynomial(8, None)` | 3.0e-7 | 1.9e-7 | 1e-5 |
 
 The two-million-knot series is within 5.7e-8 (linear) to 5.1e-7 (degree 5) in f32.
+
+**f32 at the gap limit.** The `f32` kernel computes every window whose knot gaps are
+within 1,024× of the series' mean spacing and hands the rest to `f64`. With one-second
+gaps 1,000× below the mean among sparse ones, it computed every window itself (no point
+recomputed), worst 1.2e-7 (cubic), 1.6e-7 (degree 5) and 1.1e-7 (degree 8): the limit
+leaves the bound about 60× headroom. At 1,100× those windows went to `f64`, as designed
+(`tests/contract.rs`, `f32_windows_at_the_gap_limit_meet_the_bound`; RTX 4070 Ti SUPER,
+2026-10-08).
 
 ### CI runners
 

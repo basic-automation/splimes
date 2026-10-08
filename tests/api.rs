@@ -182,6 +182,45 @@ fn cpu_and_parallel_are_bit_identical() {
 	}
 }
 
+/// Large shuffled input with duplicates takes the parallel preparation path on every
+/// backend but `Cpu`; the results are the same, bit for bit.
+#[test]
+fn parallel_preparation_changes_nothing() {
+	let n: i64 = 50_000;
+	// An odd multiplier permutes 0..n when n is coprime to it; every instant appears twice.
+	let shuffled = |i: i64| (i * 7_919) % n;
+	let points: Vec<Point> = (0..2 * n).map(|i| Point::new(at(shuffled(i % n) * 2), format!("{}", (i as f64 * 0.37).sin()).parse().expect("decimal"))).collect();
+	for spline in [Spline::Linear, Spline::Cubic, Spline::Polynomial(6, Some(0.5))] {
+		let make = |backend| Interpolator::new(spline, Resolution::Seconds).backend(backend);
+		let cpu = make(Backend::Cpu).run(&points, at(-10), at(2 * n + 10)).expect("cpu");
+		let parallel = make(Backend::Parallel).run(&points, at(-10), at(2 * n + 10)).expect("parallel");
+		assert_eq!(cpu.values(), parallel.values(), "{spline}");
+		assert_eq!(cpu.kinds(), parallel.kinds(), "{spline}");
+		assert_eq!(cpu.kinds().iter().filter(|k| **k == PointKind::Raw).count(), usize::try_from(n).expect("small"));
+	}
+}
+
+/// The kernel takes time differences in `i64` when every knot and grid point is within
+/// about 146 years of the first knot, and in `i128` otherwise. The same instants get the
+/// same values either way.
+#[test]
+fn the_i64_and_i128_paths_agree() {
+	let year = TimeDelta::days(365);
+	// Forty knots over forty years, irregular.
+	let points: Vec<Point> = (0..40).map(|i: i32| Point::new(at(0) + year * i + TimeDelta::seconds(i64::from(i * i) * 86_413), format!("{}", f64::from(i).cos() * 10.0).parse().expect("decimal"))).collect();
+	for spline in [Spline::Linear, Spline::Quadratic, Spline::Cubic, Spline::Polynomial(8, None)] {
+		for backend in [Backend::Cpu, Backend::Parallel] {
+			let make = Interpolator::new(spline, Resolution::Days).backend(backend);
+			// A grid over the data (i64), and one running 300 years past it (i128).
+			let near = make.run(&points, at(0) - year * 2, at(0) + year * 42).expect("near");
+			let far = make.run(&points, at(0) - year * 2, at(0) + year * 300).expect("far");
+			assert!(far.len() > near.len());
+			assert_eq!(near.values(), &far.values()[..near.len()], "{spline} {backend}");
+			assert_eq!(near.kinds(), &far.kinds()[..near.len()], "{spline} {backend}");
+		}
+	}
+}
+
 #[test]
 fn f64_and_bigdecimal_apis_agree() {
 	let input = points(&[(0, "1.5"), (3, "-2"), (7, "4.25"), (12, "0")]);
@@ -241,6 +280,33 @@ fn serde_wire_formats_are_stable() {
 	assert_eq!(serde_json::from_str::<Spline>(r#"{"Polynomial":[3,1.5]}"#).expect("parses"), Spline::Polynomial(3, Some(1.5)));
 }
 
+/// `Spline`'s text and serde forms round-trip every valid value bit for bit, bounds factors
+/// included (subnormal, huge, negative zero), and its parser refuses every invalid one.
+#[test]
+fn spline_text_forms_round_trip() {
+	let mut rng = common::Rng::new(0x5_911E);
+	let mut bounds: Vec<Option<f64>> = vec![None, Some(0.0), Some(-0.0), Some(f64::MIN_POSITIVE / 8.0), Some(f64::MAX), Some(1.0 / 3.0), Some(1e-300)];
+	// Random finite, non-negative doubles across every exponent.
+	bounds.extend((0..500).map(|_| Some(f64::from_bits(rng.next_u64() >> 1))).filter(|b| b.is_some_and(f64::is_finite)));
+	for degree in 1..=MAX_POLYNOMIAL_DEGREE {
+		for &b in &bounds {
+			let spline = Spline::Polynomial(degree, b);
+			let parsed: Spline = spline.to_string().parse().unwrap_or_else(|e| panic!("{spline}: {e}"));
+			assert_eq!(parsed.degree(), degree);
+			assert_eq!(parsed.bounds_factor().map(f64::to_bits), b.map(f64::to_bits), "{spline}");
+			#[cfg(feature = "serde")]
+			{
+				let json = serde_json::to_string(&spline).expect("serialises");
+				let back: Spline = serde_json::from_str(&json).expect("deserialises");
+				assert_eq!(back.bounds_factor().map(f64::to_bits), b.map(f64::to_bits), "{json}");
+			}
+		}
+	}
+	for invalid in ["Polynomial(degree: 0, bounds_factor: None)", "Polynomial(degree: 9, bounds_factor: None)", "Polynomial(degree: 3, bounds_factor: -1)", "Polynomial(degree: 3, bounds_factor: NaN)", "Polynomial(degree: 3, bounds_factor: inf)", "Polynomial(degree: 3)", "Polynomial(3, None)", "Akima", ""] {
+		assert!(invalid.parse::<Spline>().is_err(), "{invalid:?} parsed");
+	}
+}
+
 #[cfg(feature = "serde")]
 mod erased {
 	pub trait Ser {
@@ -285,6 +351,37 @@ async fn async_wrappers_run_off_the_executor() {
 	ticker.await.expect("ticker");
 	let during_f64 = ticks.load(Ordering::Relaxed) - after_bigdecimal;
 	assert!(during_f64 > 100, "run_f64_async blocked the executor: {during_f64} ticks");
+}
+
+/// `spawn` needs no feature and no particular runtime: here, on a single-threaded tokio
+/// runtime, another task keeps running while it computes, and the result is `run`'s.
+#[tokio::test(flavor = "current_thread")]
+async fn spawned_interpolations_run_off_the_executor() {
+	use std::sync::{
+		Arc, atomic::{AtomicBool, AtomicU64, Ordering}
+	};
+	let ticks = Arc::new(AtomicU64::new(0));
+	let done = Arc::new(AtomicBool::new(false));
+	let ticker = {
+		let (ticks, done) = (Arc::clone(&ticks), Arc::clone(&done));
+		tokio::spawn(async move {
+			while !done.load(Ordering::Relaxed) {
+				ticks.fetch_add(1, Ordering::Relaxed);
+				tokio::task::yield_now().await;
+			}
+		})
+	};
+	let input = points(&[(0, "0"), (100, "100")]);
+	let interpolator = Interpolator::new(Spline::Linear, Resolution::Microseconds).backend(Backend::Cpu);
+	let out = interpolator.spawn(input.clone(), at(0), at(10)).await.expect("runs");
+	assert_eq!(out.len(), 10_000_001);
+	assert_eq!(out.values()[5_000_000], dec("5"));
+	let during = ticks.load(Ordering::Relaxed);
+	assert!(during > 100, "spawn blocked the executor: {during} ticks");
+	let out = interpolator.spawn_f64(vec![at(0), at(100)], vec![0.0, 100.0], at(0), at(10)).await.expect("runs");
+	assert_eq!(out.values()[3_000_000], 3.0);
+	done.store(true, Ordering::Relaxed);
+	ticker.await.expect("ticker");
 }
 
 /// Every input value must be finite, even one a later duplicate replaces.

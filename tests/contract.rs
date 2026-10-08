@@ -379,3 +379,54 @@ fn far_bounded_extrapolation_lands_on_the_right_bound() {
 		}
 	}
 }
+
+/// The `f32` kernel computes every window whose knot gaps stay within 1,024× of the mean
+/// spacing, and hands the rest to `f64`. The contract fixtures stay far inside that limit
+/// (neighbouring gaps vary by up to 60×), so probe it: dense one-second gaps among sparse
+/// ones, at 1,000× (inside: computed in `f32`) and 1,100× (outside: recomputed) below the
+/// mean spacing. Either way, every value meets the `f32` bound against the exact reference.
+#[test]
+fn f32_windows_at_the_gap_limit_meet_the_bound() {
+	let Some(_) = common::gpu_or_skip("f32_windows_at_the_gap_limit_meet_the_bound") else { return };
+	// 5 sparse gaps, 30 one-second ones, 4 sparse: 40 knots. The sparse gap sets the mean
+	// spacing h = (30 s + 9·sparse) / 39 to 1,000 s and to just under 1,100 s.
+	for (sparse_ms, inside) in [(4_330_000_i64, true), (4_763_333, false)] {
+		let gaps: Vec<i64> = (0..39).map(|g| if (5..35).contains(&g) { 1_000 } else { sparse_ms }).collect();
+		let mut t = epoch();
+		let mut timestamps = vec![t];
+		for gap in &gaps {
+			t += TimeDelta::milliseconds(*gap);
+			timestamps.push(t);
+		}
+		let values: Vec<f64> = (0..40).map(|i| (f64::from(i) * 0.3).sin()).collect();
+		let points: Vec<Point> = timestamps.iter().zip(&values).map(|(&t, &v)| Point::new(t, format!("{v:e}").parse().expect("finite"))).collect();
+		let (min, max) = common::value_range(&points);
+		let range = to_f64(&(&max - &min));
+		// Across the sparse knots before the burst, into the burst (half-second offsets, so
+		// between its knots), and out of it.
+		let grids = [(timestamps[2], timestamps[7], Resolution::Minutes), (timestamps[5] - TimeDelta::milliseconds(3_600_500), timestamps[9], Resolution::Seconds), (timestamps[32] + TimeDelta::milliseconds(500), timestamps[37], Resolution::Seconds)];
+		for spline in [Spline::Cubic, Spline::Polynomial(5, None), Spline::Polynomial(8, None)] {
+			let (mut worst, mut recomputed) = (0.0_f64, 0);
+			for &(start, end, resolution) in &grids {
+				let out = Interpolator::new(spline, resolution).backend(Backend::Gpu).gpu_precision(Precision::F32).run_f64(&timestamps, &values, start, end).expect("runs");
+				recomputed += out.points_recomputed_in_f64();
+				for ((&at, &got), kind) in out.timestamps().iter().zip(out.values()).zip(out.kinds()) {
+					if *kind == PointKind::Raw {
+						continue;
+					}
+					let (exact, lebesgue) = exact_with_lebesgue(&points, spline, at);
+					let exact = to_f64(&exact);
+					let err = ((got - exact).abs() - f64::EPSILON * exact.abs()).max(0.0) / (range * lebesgue);
+					assert!(err <= bound(Precision::F32, spline.degree()), "{spline}, gaps {sparse_ms} ms, at {at}: {got} vs {exact} ({err:.2e} of range · Λ)");
+					worst = worst.max(err);
+				}
+			}
+			println!("f32 at the gap limit ({}), {spline}: worst {worst:.2e}, {recomputed} points recomputed in f64", if inside { "1,000×, inside" } else { "1,100×, outside" });
+			if inside {
+				assert_eq!(recomputed, 0, "{spline}: windows inside the limit are the f32 kernel's");
+			} else {
+				assert!(recomputed > 0, "{spline}: windows past the limit go to f64");
+			}
+		}
+	}
+}

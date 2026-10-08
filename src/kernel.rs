@@ -47,11 +47,40 @@ impl Method {
 	}
 }
 
+/// An integer time offset in nanoseconds. `i128` holds any two instants chrono can
+/// represent and their difference; `i64` is the fast path, for knots and grid points all
+/// within [`I64_SPAN`] of the first knot, which is nearly every series. Both give the same
+/// `f64` for the same value, so the path taken never changes a result.
+pub trait Nanos: Copy + Ord + Send + Sync + std::ops::Add<Output = Self> + std::ops::Sub<Output = Self> + TryFrom<i128> {
+	/// The nearest `f64`.
+	fn to_f64(self) -> f64;
+}
+
+impl Nanos for i128 {
+	#[inline]
+	fn to_f64(self) -> f64 {
+		nanos_to_f64(self)
+	}
+}
+
+impl Nanos for i64 {
+	#[inline]
+	fn to_f64(self) -> f64 {
+		#[allow(clippy::cast_precision_loss)] // Rounds to nearest, exactly as `nanos_to_f64`.
+		let v = self as f64;
+		v
+	}
+}
+
+/// Offsets within ±2⁶² ns (about 146 years) of the first knot: any two of them differ by
+/// less than 2⁶³, so every difference the kernel takes fits an `i64`.
+pub const I64_SPAN: i128 = 1 << 62;
+
 /// What the kernel reads: knot offsets in nanoseconds, normalised values, and the time
 /// scale as `inv_h`, the reciprocal of the mean knot spacing in nanoseconds.
 #[derive(Clone, Copy)]
-pub struct Data<'k> {
-	pub offsets: &'k [i128],
+pub struct Data<'k, N = i128> {
+	pub offsets: &'k [N],
 	pub y: &'k [f64],
 	pub inv_h: f64,
 }
@@ -60,8 +89,8 @@ pub struct Data<'k> {
 /// The GPU kernels compute exactly this, so CPU and GPU `f64` agree to the last bit when
 /// the difference is below 2⁵³ ns.
 #[inline]
-fn diff(a: i128, b: i128, inv_h: f64) -> f64 {
-	nanos_to_f64(a - b) * inv_h
+fn diff<N: Nanos>(a: N, b: N, inv_h: f64) -> f64 {
+	(a - b).to_f64() * inv_h
 }
 
 /// The Lagrange weights `y_j / Π_{k≠j} (u_j − u_k)` of the current window, prepared once
@@ -80,7 +109,7 @@ impl Window {
 		Self { start: usize::MAX, len: 0, weight: [0.0; MAX_WINDOW] }
 	}
 
-	fn prepare(&mut self, data: Data<'_>, start: usize, m: usize) {
+	fn prepare<N: Nanos>(&mut self, data: Data<'_, N>, start: usize, m: usize) {
 		if self.start == start && self.len == m {
 			return;
 		}
@@ -109,7 +138,7 @@ impl Window {
 /// times the local spacing.
 #[inline]
 #[allow(clippy::many_single_char_names)] // The usual names in the numerics literature.
-pub fn eval(data: Data<'_>, method: &Method, t: i128, p: usize, window: &mut Window) -> f64 {
+pub fn eval<N: Nanos>(data: Data<'_, N>, method: &Method, t: N, p: usize, window: &mut Window) -> f64 {
 	let Data { offsets, y, inv_h } = data;
 	let n = offsets.len();
 	let below = t < offsets[0];
@@ -175,12 +204,11 @@ pub fn eval(data: Data<'_>, method: &Method, t: i128, p: usize, window: &mut Win
 ///
 /// Grid points ascend, so after one binary search for the first, the knot cursor only
 /// walks forward: `O(n + m)` for the chunk instead of `O(m log n)`.
-fn eval_chunk<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, first: usize, out: &mut [f64]) {
-	let data = knots.data();
+fn eval_chunk<N: Nanos>(data: Data<'_, N>, grid: &GridOffsets<N>, method: &Method, first: usize, out: &mut [f64]) {
 	let offsets = data.offsets;
 	let mut window = Window::new();
 	let mut p = None;
-	for (slot, t) in out.iter_mut().zip(grid.offsets(knots.t0, first)) {
+	for (slot, t) in out.iter_mut().zip(grid.from(first)) {
 		let mut q = p.unwrap_or_else(|| offsets.partition_point(|&o| o <= t));
 		while q < offsets.len() && offsets[q] <= t {
 			q += 1;
@@ -194,14 +222,62 @@ fn eval_chunk<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, firs
 /// scheduling, small enough to balance across cores.
 const PARALLEL_CHUNK: usize = 16 * 1024;
 
+/// The grid as offsets from the first knot, in the kernel's integer type.
+#[derive(Clone, Copy)]
+struct GridOffsets<N> {
+	start: i128,
+	step: i128,
+	step_n: N,
+}
+
+impl<N: Nanos> GridOffsets<N> {
+	/// Offsets of grid points `first..`, by repeated addition: exact, and far cheaper than
+	/// a multiply per point.
+	fn from(&self, first: usize) -> impl Iterator<Item = N> {
+		let step = self.step_n;
+		// A grid point's offset fits `N`: that is what chose `N` (see `Offsets::new`).
+		let first = N::try_from(self.start + self.step * first as i128).ok();
+		std::iter::successors(first, move |&o| Some(o + step))
+	}
+}
+
+/// The knots and grid in the narrowest integer type that holds every offset.
+enum Offsets<'k> {
+	I64(Data<'k, i64>, GridOffsets<i64>),
+	I128(Data<'k, i128>, GridOffsets<i128>),
+}
+
+impl<'k> Offsets<'k> {
+	/// `i64` when the knots and every grid point are within [`I64_SPAN`] of the first knot,
+	/// which is nearly always, and `i128` otherwise. Both give the same results.
+	fn new<V: Value>(knots: &'k Knots<'_, V>, grid: &Grid) -> Self {
+		let (start, step) = (grid.offset_nanos(knots.t0, 0), i128::from(grid.step_nanos));
+		let last = grid.offset_nanos(knots.t0, grid.len.saturating_sub(1));
+		let within = |o: i128| (-I64_SPAN..=I64_SPAN).contains(&o);
+		if let (Some(offsets), true, Ok(step_n)) = (knots.offsets64.as_deref(), within(start) && within(last), i64::try_from(step)) {
+			return Self::I64(Data { offsets, y: &knots.y, inv_h: 1.0 / knots.h }, GridOffsets { start, step, step_n });
+		}
+		Self::I128(knots.data(), GridOffsets { start, step, step_n: step })
+	}
+}
+
 /// Every grid point, normalised, on the calling thread.
 pub fn eval_serial<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64]) {
-	eval_chunk(knots, grid, method, 0, out);
+	match Offsets::new(knots, grid) {
+		Offsets::I64(data, g) => eval_chunk(data, &g, method, 0, out),
+		Offsets::I128(data, g) => eval_chunk(data, &g, method, 0, out),
+	}
 }
 
 /// Every grid point, normalised, across rayon's pool.
 pub fn eval_parallel<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64]) {
-	out.par_chunks_mut(PARALLEL_CHUNK).enumerate().for_each(|(c, chunk)| eval_chunk(knots, grid, method, c * PARALLEL_CHUNK, chunk));
+	fn run<N: Nanos>(data: Data<'_, N>, g: &GridOffsets<N>, method: &Method, out: &mut [f64]) {
+		out.par_chunks_mut(PARALLEL_CHUNK).enumerate().for_each(|(c, chunk)| eval_chunk(data, g, method, c * PARALLEL_CHUNK, chunk));
+	}
+	match Offsets::new(knots, grid) {
+		Offsets::I64(data, g) => run(data, &g, method, out),
+		Offsets::I128(data, g) => run(data, &g, method, out),
+	}
 }
 
 /// The first knot of the window for a point with `p` knots at or before it.
@@ -411,5 +487,27 @@ mod tests {
 		let y = [0.0, 1.0, 1.0, 0.0];
 		let got = eval(Data { offsets: &o, y: &y, inv_h: 3.0 / 2e16 }, &method(2), year / 2, 1, &mut Window::new());
 		assert!((got - 0.5).abs() < 1e-15, "{got}");
+	}
+
+	#[test]
+	fn i64_and_i128_offsets_agree_bit_for_bit() {
+		// Irregular knots over a few years, evaluated inside, at and outside them, for every
+		// window size, with and without the hold and the bounds.
+		let o: Vec<i128> = (0..40_i128).map(|i| i * i * 86_400_000_000_123 + (i * 7_919) % 1_000_003).collect();
+		let o64: Vec<i64> = o.iter().map(|&x| i64::try_from(x).expect("fits")).collect();
+		let y: Vec<f64> = (0..40).map(|i| (f64::from(i) * 0.7).sin()).collect();
+		let inv_h = 39.0 / 1.3e17;
+		for window in 1..=MAX_WINDOW {
+			for (hold, bounds) in [(false, None), (true, None), (false, Some((-0.5, 0.75)))] {
+				let method = Method { window, hold, bounds };
+				for k in -50..1_000_i128 {
+					let t = k * 157_000_000_000_017 - 3;
+					let p = o.partition_point(|&x| x <= t);
+					let wide = eval(Data { offsets: &o, y: &y, inv_h }, &method, t, p, &mut Window::new());
+					let narrow = eval(Data { offsets: &o64, y: &y, inv_h }, &method, i64::try_from(t).expect("fits"), p, &mut Window::new());
+					assert_eq!(wide.to_bits(), narrow.to_bits(), "window {window} at {t}");
+				}
+			}
+		}
 	}
 }
