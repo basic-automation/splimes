@@ -20,7 +20,8 @@ pub struct GpuConfig {
 	/// storage-buffer binding limit.
 	pub chunk_points: u32,
 	/// Prefer a low-power adapter (an integrated GPU) over a high-performance one when the
-	/// system has both (default `false`).
+	/// system has both (default `false`). Ignored when the `WGPU_ADAPTER_NAME` environment
+	/// variable names the adapter (see the crate docs' "Backends").
 	pub low_power: bool,
 }
 

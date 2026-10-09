@@ -26,6 +26,10 @@ cargo run --release --example calibrate         # the crossover table
 cargo test --release --test contract -- --nocapture --test-threads 1   # the accuracy tables
 ```
 
+On a machine with more than one GPU, or to measure another graphics API, choose the
+adapter with wgpu's variables, for example
+`WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME="rtx 4070"` in front of any of these.
+
 Every benchmark interpolates a deterministic irregular series (a sine, knot spacing
 jittered by up to 40%) onto a millisecond grid spanning it, so the whole grid is
 interpolation, and returns `f64` unless the row says otherwise. Times are criterion

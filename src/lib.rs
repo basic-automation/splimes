@@ -102,7 +102,7 @@
 //! windows at the 1,024× gap limit. It fails if a bound is exceeded. `tests/properties.rs`
 //! checks the same bound, and the input and provenance rules above, on 1,024 generated
 //! series of the input the docs promise to accept: unsorted, with duplicate instants,
-//! single points and constant values.
+//! single points and constant values, through `run`, `run_f64`, `spawn` and `spawn_f64`.
 //!
 //! # Backends
 //!
@@ -113,6 +113,14 @@
 //! reruns on the CPU and says so in [`Interpolation::gpu_fallback`]; an explicit
 //! [`Backend::Gpu`] returns the error. splimes never opens the device on a thread of its
 //! own: a process exiting while a driver initialises on another thread can crash.
+//!
+//! The GPU is the high-performance adapter wgpu finds (or the low-power one, with
+//! [`GpuConfig::low_power`]). wgpu's environment variables choose another, as they do
+//! in any wgpu program: `WGPU_BACKEND` limits the graphics APIs tried (for example
+//! `vulkan`, `dx12`, `metal` or `gl`), and `WGPU_ADAPTER_NAME` picks the first adapter
+//! whose name contains it, ignoring case. A name that matches no adapter makes the GPU
+//! unavailable, with the adapters found in the error; splimes never falls back to another.
+//! [`gpu_info`] reports the adapter and API in use.
 //!
 //! All entry points are synchronous and CPU- or GPU-bound. From async code, use
 //! [`Interpolator::spawn`], which runs the work on rayon's pool and returns a future any
