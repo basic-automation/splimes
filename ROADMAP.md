@@ -33,9 +33,9 @@ over `BigDecimal` values.
 splimes ships 1.0 when every box below is ticked, or the item is explicitly dropped or
 deferred with a reason.
 
-**Shipped as 1.0.0 on 2026-10-05.** Three items are deferred past 1.0: two portability
+**Shipped as 1.0.0 on 2026-10-05.** Three items were deferred past 1.0: two portability
 items, which need hardware the project doesn't have, and WeftDB's switch, which needed
-the published crate and is in progress.
+the published crate and landed on 2026-10-06.
 
 ### Correctness
 
@@ -80,7 +80,7 @@ the published crate and is in progress.
 - [x] Merged `release/1.0` ([#1](https://github.com/basic-automation/splimes/pull/1))
 - [x] crates.io trusted publishing for `release.yml`, the only way to publish: the crate refuses new versions published with an API token, and the GitHub `release` environment deploys only from `v*` tags
 - [x] Published 1.0.0 to crates.io from the `v1.0.0` tag (2026-10-05)
-- [ ] Switch WeftDB to `splimes = "1"` ([MIGRATING.md](MIGRATING.md)) *(deferred past 1.0: it needs the published crate; in progress)*
+- [x] Switch WeftDB to `splimes = "1"` ([MIGRATING.md](MIGRATING.md)): WeftDB's workspace takes `splimes = "1"` from crates.io and dropped its temporary patch on 2026-10-06 ([weftdb@6ae2ce8](https://github.com/basic-automation/weftdb/commit/6ae2ce8))
 
 ---
 
@@ -103,7 +103,7 @@ change to what any method computes.
 - [x] **`spawn` on the GPU** (`tests/gpu.rs`): sixteen `Backend::Gpu` futures in flight at once on rayon's pool, awaited on one thread, each matching the CPU
 - [x] **This release's fast paths change nothing** (`tests/api.rs`): 100,000 shuffled inputs with every instant duplicated give bit-identical results on `Cpu` (serial preparation) and `Parallel` (parallel); a 300-year grid (the `i128` kernel) and a 44-year one (`i64`) give bit-identical values at their shared instants
 - [x] **`f32` windows at the 1,024× gap limit** (`tests/contract.rs`): just inside it (1,000×) the `f32` kernel computes every window and stays within 1.6e-7 of the 1e-5 bound; just outside (1,100×) the windows go to `f64`. The fixtures stopped at 60×
-- [ ] WeftDB persists `Spline`: if it stores it as JSON through serde_json, enable serde_json's `float_roundtrip` feature there, or a stored `Polynomial` bounds factor can come back an ulp off *(owner: WeftDB repository)*
+- [ ] WeftDB persists `Spline` as JSON: `PipelineConfig::spline_method` is written and read with `serde_json::to_string` / `from_str` (`weftdb/src/types/database/pipeline.rs`), and WeftDB's manifests don't enable serde_json's `float_roundtrip` feature, so a stored `Polynomial` bounds factor can come back an ulp off. Fix: `serde_json = { version = "1", features = ["float_roundtrip"] }` in WeftDB's workspace, plus a round-trip test there *(owner: WeftDB repository; checked 2026-10-09)*
 
 ---
 
