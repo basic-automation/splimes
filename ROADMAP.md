@@ -106,6 +106,7 @@ change to what any method computes.
 - [x] **`spawn` on the GPU** (`tests/gpu.rs`): sixteen `Backend::Gpu` futures in flight at once on rayon's pool, awaited on one thread, each matching the CPU
 - [x] **This release's fast paths change nothing** (`tests/api.rs`): 100,000 shuffled inputs with every instant duplicated give bit-identical results on `Cpu` (serial preparation) and `Parallel` (parallel); a 300-year grid (the `i128` kernel) and a 44-year one (`i64`) give bit-identical values at their shared instants
 - [x] **`f32` windows at the 1,024× gap limit** (`tests/contract.rs`): just inside it (1,000×) the `f32` kernel computes every window and stays within 1.6e-7 of the 1e-5 bound; just outside (1,100×) the windows go to `f64`. The fixtures stopped at 60×
+- [x] **`spawn` returns `run`'s answer** (`tests/properties.rs`): on all 1,024 generated series, on every backend and precision, `spawn` and `spawn_f64` awaited on a single-threaded executor give bit-identical results to `run` and `run_f64`, and `exact(true)`'s refusal comes through `spawn` unchanged
 - [ ] WeftDB persists `Spline` as JSON: `PipelineConfig::spline_method` is written and read with `serde_json::to_string` / `from_str` (`weftdb/src/types/database/pipeline.rs`), and WeftDB's manifests don't enable serde_json's `float_roundtrip` feature, so a stored `Polynomial` bounds factor can come back an ulp off. Fix: `serde_json = { version = "1", features = ["float_roundtrip"] }` in WeftDB's workspace, plus a round-trip test there *(owner: WeftDB repository; checked 2026-10-09)*
 
 ---

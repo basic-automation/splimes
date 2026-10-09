@@ -10,7 +10,7 @@
 //!   the input's own value, every digit of it;
 //! - the method reported is the documented step-down, and `exact(true)` refuses it;
 //! - the grid is `start, start + step, …`, never past `end`;
-//! - `run` and `run_f64` agree;
+//! - `run` and `run_f64` agree, and `spawn` and `spawn_f64` return exactly what they do;
 //! - every value is within the published bound of the exact reference.
 
 mod common;
@@ -142,6 +142,8 @@ fn check(c: &Case, distinct: &[Point], backend: Backend, precision: Precision, o
 #[test]
 fn every_backend_keeps_the_input_contract() {
 	let configurations = configurations();
+	// Any executor can await `spawn`'s future; a single-threaded one shows it needs none.
+	let executor = tokio::runtime::Builder::new_current_thread().build().expect("a tokio runtime");
 	let mut checked = 0;
 	for seed in 0..CASES {
 		let c = case(seed);
@@ -169,12 +171,16 @@ fn every_backend_keeps_the_input_contract() {
 			let decimal: Vec<f64> = out.values().iter().map(to_f64).collect();
 			assert_eq!(f.values(), decimal.as_slice(), "{} on {backend} {precision}: run and run_f64 agree", c.label);
 			assert_eq!(f.kinds(), out.kinds(), "{} on {backend} {precision}", c.label);
+			// spawn and spawn_f64 are run and run_f64 on rayon's pool: the same result, bit for bit.
+			assert_eq!(executor.block_on(interpolator.spawn(c.points.clone(), c.start, c.end)), Ok(out.clone()), "{} on {backend} {precision}: spawn", c.label);
+			assert_eq!(executor.block_on(interpolator.spawn_f64(ts.clone(), vs.clone(), c.start, c.end)), Ok(f), "{} on {backend} {precision}: spawn_f64", c.label);
 			checked += out.len();
 		}
 
 		// exact(true) refuses exactly when the documented step-down would apply.
 		let cpu = Interpolator::new(c.spline, Resolution::Seconds).backend(Backend::Cpu);
 		let exact = cpu.exact(true).run(&c.points, c.start, c.end);
+		assert_eq!(executor.block_on(cpu.exact(true).spawn(c.points.clone(), c.start, c.end)), exact, "{}: spawn, exact", c.label);
 		if distinct.len() < c.spline.min_points() {
 			assert_eq!(exact, Err(Error::InsufficientPoints { spline: c.spline, required: c.spline.min_points(), available: distinct.len() }), "{}", c.label);
 		} else {
