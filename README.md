@@ -23,7 +23,8 @@ extrapolation.
 - **Backends:** one CPU thread, rayon's thread pool, or the GPU via
   [`wgpu`](https://wgpu.rs) (Vulkan, Metal, DX12), picked per call by size or chosen
   explicitly. A GPU failure never panics: automatic selection reruns on the CPU and
-  tells you why.
+  tells you why. With several GPUs, wgpu's `WGPU_ADAPTER_NAME` (or `WGPU_BACKEND`)
+  picks which one.
 - **Values:** `BigDecimal` or `f64`. Computation is in `f64` (or `f32` on the GPU, if
   you ask), against a published, tested error bound. Points that land on an input
   return that input exactly, every digit intact.
