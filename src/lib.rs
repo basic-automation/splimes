@@ -102,7 +102,7 @@
 //! windows at the 1,024× gap limit. It fails if a bound is exceeded. `tests/properties.rs`
 //! checks the same bound, and the input and provenance rules above, on 1,024 generated
 //! series of the input the docs promise to accept: unsorted, with duplicate instants,
-//! single points and constant values.
+//! single points and constant values, through `run`, `run_f64`, `spawn` and `spawn_f64`.
 //!
 //! # Backends
 //!
