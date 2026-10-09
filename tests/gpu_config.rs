@@ -18,3 +18,25 @@ fn starting_the_gpu_fixes_its_configuration() {
 		assert!(splimes::gpu_info().is_some());
 	}
 }
+
+/// `WGPU_ADAPTER_NAME` that names no adapter makes the GPU unavailable, with a message that
+/// says why, rather than panicking (wgpu's own helper for the variable does) or quietly
+/// opening some other adapter. In a child process, because the variable is read once, as
+/// the GPU starts.
+#[test]
+fn an_adapter_name_that_matches_nothing_is_refused() {
+	const CHILD: &str = "SPLIMES_TEST_ADAPTER_NAME_CHILD";
+	if std::env::var_os(CHILD).is_some() {
+		match splimes::prewarm_gpu() {
+			Err(Error::GpuUnavailable(reason)) => assert!(reason.contains("WGPU_ADAPTER_NAME") && reason.contains("matches no adapter"), "{reason}"),
+			other => panic!("expected GpuUnavailable, got {other:?}"),
+		}
+		assert!(splimes::gpu_info().is_none());
+		return;
+	}
+	let exe = std::env::current_exe().expect("the test binary's path");
+	let out = std::process::Command::new(exe).args(["--exact", "an_adapter_name_that_matches_nothing_is_refused", "--nocapture", "--test-threads", "1"]).env(CHILD, "1").env("WGPU_ADAPTER_NAME", "no such adapter 5f3c").output().expect("the child runs");
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(out.status.success(), "child failed:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+	assert!(stdout.contains("1 passed"), "the child ran no test:\n{stdout}");
+}

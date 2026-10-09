@@ -10,6 +10,15 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Added
+
+- The GPU adapter can be chosen with wgpu's environment variables: `WGPU_BACKEND`
+  limits the graphics APIs tried (`vulkan`, `dx12`, `metal`, `gl`, …) and
+  `WGPU_ADAPTER_NAME` picks the first adapter whose name contains it, ignoring case.
+  Until now only `GpuConfig::low_power` chose between adapters. A name that matches no
+  adapter makes the GPU unavailable (`Error::GpuUnavailable`, listing the adapters
+  found) instead of falling back to another; `gpu_info()` reports the one in use.
+
 ## [1.1.0] - 2026-10-08
 
 ### Added
