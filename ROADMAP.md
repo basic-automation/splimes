@@ -103,6 +103,7 @@ change to what any method computes.
 - [x] **`spawn` on the GPU** (`tests/gpu.rs`): sixteen `Backend::Gpu` futures in flight at once on rayon's pool, awaited on one thread, each matching the CPU
 - [x] **This release's fast paths change nothing** (`tests/api.rs`): 100,000 shuffled inputs with every instant duplicated give bit-identical results on `Cpu` (serial preparation) and `Parallel` (parallel); a 300-year grid (the `i128` kernel) and a 44-year one (`i64`) give bit-identical values at their shared instants
 - [x] **`f32` windows at the 1,024× gap limit** (`tests/contract.rs`): just inside it (1,000×) the `f32` kernel computes every window and stays within 1.6e-7 of the 1e-5 bound; just outside (1,100×) the windows go to `f64`. The fixtures stopped at 60×
+- [x] **`Backend::Cpu` stays on the calling thread** (`tests/cpu_backend.rs`): with every rayon worker blocked, a `Cpu` call on 64 Ki unsorted inputs and a million-point grid, through `run` and `run_f64`, still completes. Mutation testing of this run's single-pass assembly found nothing checked the promise: swapping serial and parallel preparation, kernel or assembly changed no result, and each now fails the test
 - [ ] WeftDB persists `Spline`: if it stores it as JSON through serde_json, enable serde_json's `float_roundtrip` feature there, or a stored `Polynomial` bounds factor can come back an ulp off *(owner: WeftDB repository)*
 
 ---
