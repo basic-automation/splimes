@@ -393,6 +393,27 @@ mod tests {
 		eval(Data { offsets: o, y, inv_h: 0.1 }, method, t, o.partition_point(|&x| x <= t), &mut Window::new())
 	}
 
+	/// The kernel and output assembly take `i64` differences when the knots and every grid
+	/// point lie within [`I64_SPAN`] (about 146 years) of the first knot, on either side,
+	/// and `i128` otherwise. Both give the same results, so only this sees the choice.
+	#[test]
+	fn i64_offsets_when_everything_is_within_the_span() {
+		use chrono::{DateTime, Utc};
+
+		use crate::{Resolution, time::Grid};
+
+		let at = |years: i64| DateTime::<Utc>::from_timestamp(years * 365 * 86_400, 0).expect("valid");
+		let ys = [0.0, 1.0, 2.0];
+		let (near, far) = ([at(0), at(1), at(2)], [at(0), at(1), at(200)]);
+		let near = Knots::new(3, |i| near[i], |i| &ys[i], false).expect("knots");
+		let far = Knots::new(3, |i| far[i], |i| &ys[i], false).expect("knots");
+		let narrow = |knots: &Knots<'_, f64>, start, end| narrow_offsets(knots, &Grid::new(at(start), at(end), Resolution::Days).expect("grid")).is_some();
+		assert!(narrow(&near, -100, 100), "a century either side");
+		assert!(!narrow(&near, -200, 0), "two centuries before");
+		assert!(!narrow(&near, 0, 200), "two centuries after");
+		assert!(!narrow(&far, 0, 1), "knots two centuries apart");
+	}
+
 	#[test]
 	fn every_window_passes_through_the_knots() {
 		let o = [0, 10, 25, 30, 42, 60];
