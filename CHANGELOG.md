@@ -10,6 +10,33 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Added
+
+- `examples/resample.rs`: resamples `timestamp,value` lines from standard input (or a
+  built-in sample) onto a one-second cubic grid and prints each point's provenance,
+  showing `run_f64`, `exact(true)`, `max_points` and the report of what ran.
+
+### Changed
+
+- **Faster output assembly on rayon's pool.** Each output column (timestamps, values,
+  provenance) is now written once, straight into its allocation, instead of being
+  filled with placeholders and overwritten, and the provenance walk compares offsets in
+  `i64` whenever the kernel does. `Parallel` calls of 64 Ki grid points and more take
+  10–25% less time (16 Mi points: 70.8 → 53.5 ms); `Cpu` is unchanged
+  ([BENCHMARKS.md](BENCHMARKS.md#output-assembly-in-one-pass-unreleased)). Results are
+  unchanged.
+
+### Fixed
+
+- **A GPU device lost mid-call is an error, never stale values.** splimes checked for
+  device loss only when a call started. wgpu 30 can report a result buffer's mapping as
+  successful although the device was lost before the mapping was processed
+  ([gfx-rs/wgpu#10301](https://github.com/gfx-rs/wgpu/pull/10301), fixed after 30.0.1),
+  and the buffer then holds what it held before: for a pooled buffer, an earlier call's
+  results. splimes now also checks after every read-back, so a call during which the
+  device is lost returns `Error::GpuUnavailable` (`Backend::Auto` reruns it on the CPU
+  and reports why).
+
 ## [1.1.0] - 2026-10-08
 
 ### Added

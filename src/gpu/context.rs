@@ -77,7 +77,7 @@ pub fn ready(precision: Precision) -> bool {
 	try_get().is_some_and(|ctx| ctx.kernel(precision).is_ok())
 }
 
-fn open() -> Result<Context, String> {
+pub fn open() -> Result<Context, String> {
 	let config = super::fix_config();
 	let instance = Instance::new(InstanceDescriptor { flags: wgpu::InstanceFlags::from_build_config().with_env(), ..InstanceDescriptor::new_without_display_handle() });
 	let power_preference = if config.low_power { PowerPreference::LowPower } else { PowerPreference::HighPerformance };

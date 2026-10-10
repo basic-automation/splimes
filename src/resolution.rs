@@ -139,7 +139,11 @@ mod tests {
 		for pair in Resolution::ALL.windows(2) {
 			assert!(pair[0].step_nanos() < pair[1].step_nanos());
 		}
-		assert_eq!(Resolution::Months.step(), TimeDelta::days(30));
-		assert_eq!(Resolution::Years.step(), TimeDelta::days(365));
+		// Every step, exactly: an increasing sequence alone allowed `Weeks` to be wrong.
+		let steps = [TimeDelta::nanoseconds(1), TimeDelta::microseconds(1), TimeDelta::milliseconds(1), TimeDelta::seconds(1), TimeDelta::minutes(1), TimeDelta::hours(1), TimeDelta::days(1), TimeDelta::weeks(1), TimeDelta::days(30), TimeDelta::days(365)];
+		for (&r, step) in Resolution::ALL.iter().zip(steps) {
+			assert_eq!(r.step(), step, "{r}");
+			assert_eq!(Some(r.step_nanos()), step.num_nanoseconds(), "{r}");
+		}
 	}
 }

@@ -89,6 +89,10 @@ assert_eq!(series.spline(), Spline::Quadratic);
 # Ok::<(), splimes::Error>(())
 ```
 
+`examples/resample.rs` is a small command-line program built on these calls: it reads
+`timestamp,value` lines, in any order, and prints the resampled series with each
+point's provenance (`cargo run --example resample < readings.csv`).
+
 From async code, `spawn` (or `spawn_f64`) runs the work on rayon's pool and returns a
 future that any executor can await, with no feature flag:
 `interpolator.spawn(points, start, end).await?`. Dropping the future cancels work that
@@ -111,8 +115,9 @@ has the precise statement. It is part of the semver promise.
 ## Performance
 
 On a 16-core Ryzen 9 7950X3D with an RTX 4070 Ti SUPER, a cubic resample of 4,096
-irregular points onto a 16.7-million-point grid takes about **100 ms** on rayon's pool,
-against 670 ms on one thread, and a million points about 7–12 ms. Building the output
+irregular points onto a 16.7-million-point grid takes about **55 ms** on rayon's pool,
+against about 340 ms on one thread, and a million points about 5 ms, measured on an
+otherwise quiet machine. Building the output
 (timestamps, values, provenance) costs the same whichever backend computed the values,
 and it dominates, so the GPU gains little: here it at best ties rayon in `f64` and wins
 modestly in `f32` at a million points and more. `Backend::Auto` therefore uses the GPU

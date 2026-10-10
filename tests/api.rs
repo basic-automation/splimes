@@ -178,6 +178,8 @@ fn cpu_and_parallel_are_bit_identical() {
 		assert_eq!(a.len(), 2_000_001);
 		assert_eq!(a.values(), b.values(), "{spline}");
 		assert_eq!(a.kinds(), b.kinds(), "{spline}");
+		assert_eq!(a.timestamps(), b.timestamps(), "{spline}");
+		assert!(b.timestamps().iter().zip(0..).all(|(&t, k)| t == start + TimeDelta::milliseconds(k)), "{spline}: every grid point, from every rayon job");
 		assert_eq!(b.backend(), Backend::Parallel);
 	}
 }
@@ -217,6 +219,7 @@ fn the_i64_and_i128_paths_agree() {
 			assert!(far.len() > near.len());
 			assert_eq!(near.values(), &far.values()[..near.len()], "{spline} {backend}");
 			assert_eq!(near.kinds(), &far.kinds()[..near.len()], "{spline} {backend}");
+			assert_eq!(near.timestamps(), &far.timestamps()[..near.len()], "{spline} {backend}");
 		}
 	}
 }
