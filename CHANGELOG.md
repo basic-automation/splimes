@@ -10,6 +10,12 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Added
+
+- `examples/resample.rs`: resamples `timestamp,value` lines from standard input (or a
+  built-in sample) onto a one-second cubic grid and prints each point's provenance,
+  showing `run_f64`, `exact(true)`, `max_points` and the report of what ran.
+
 ### Changed
 
 - **Faster output assembly on rayon's pool.** Each output column (timestamps, values,

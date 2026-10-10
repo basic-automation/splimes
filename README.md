@@ -89,6 +89,10 @@ assert_eq!(series.spline(), Spline::Quadratic);
 # Ok::<(), splimes::Error>(())
 ```
 
+`examples/resample.rs` is a small command-line program built on these calls: it reads
+`timestamp,value` lines, in any order, and prints the resampled series with each
+point's provenance (`cargo run --example resample < readings.csv`).
+
 From async code, `spawn` (or `spawn_f64`) runs the work on rayon's pool and returns a
 future that any executor can await, with no feature flag:
 `interpolator.spawn(points, start, end).await?`. Dropping the future cancels work that
