@@ -54,12 +54,22 @@ impl Method {
 pub trait Nanos: Copy + Ord + Send + Sync + std::ops::Add<Output = Self> + std::ops::Sub<Output = Self> + TryFrom<i128> {
 	/// The nearest `f64`.
 	fn to_f64(self) -> f64;
+
+	/// `v`, saturated to this type's range. Callers only pass offsets that the choice of
+	/// type (see [`narrow_offsets`]) guarantees fit, so this never saturates; it just
+	/// avoids a panic path.
+	fn saturating_from(v: i128) -> Self;
 }
 
 impl Nanos for i128 {
 	#[inline]
 	fn to_f64(self) -> f64 {
 		nanos_to_f64(self)
+	}
+
+	#[inline]
+	fn saturating_from(v: i128) -> Self {
+		v
 	}
 }
 
@@ -69,6 +79,11 @@ impl Nanos for i64 {
 		#[allow(clippy::cast_precision_loss)] // Rounds to nearest, exactly as `nanos_to_f64`.
 		let v = self as f64;
 		v
+	}
+
+	#[inline]
+	fn saturating_from(v: i128) -> Self {
+		Self::try_from(v).unwrap_or(if v < 0 { Self::MIN } else { Self::MAX })
 	}
 }
 
@@ -252,13 +267,20 @@ impl<'k> Offsets<'k> {
 	/// which is nearly always, and `i128` otherwise. Both give the same results.
 	fn new<V: Value>(knots: &'k Knots<'_, V>, grid: &Grid) -> Self {
 		let (start, step) = (grid.offset_nanos(knots.t0, 0), i128::from(grid.step_nanos));
-		let last = grid.offset_nanos(knots.t0, grid.len.saturating_sub(1));
-		let within = |o: i128| (-I64_SPAN..=I64_SPAN).contains(&o);
-		if let (Some(offsets), true, Ok(step_n)) = (knots.offsets64.as_deref(), within(start) && within(last), i64::try_from(step)) {
+		if let (Some(offsets), Ok(step_n)) = (narrow_offsets(knots, grid), i64::try_from(step)) {
 			return Self::I64(Data { offsets, y: &knots.y, inv_h: 1.0 / knots.h }, GridOffsets { start, step, step_n });
 		}
 		Self::I128(knots.data(), GridOffsets { start, step, step_n: step })
 	}
+}
+
+/// The knot offsets as `i64`, if they and every grid point are within [`I64_SPAN`] of the
+/// first knot, so that every offset and difference the kernel and output assembly take
+/// fits an `i64`.
+pub fn narrow_offsets<'k, V: Value>(knots: &'k Knots<'_, V>, grid: &Grid) -> Option<&'k [i64]> {
+	let within = |o: i128| (-I64_SPAN..=I64_SPAN).contains(&o);
+	let (start, last) = (grid.offset_nanos(knots.t0, 0), grid.offset_nanos(knots.t0, grid.len.saturating_sub(1)));
+	knots.offsets64.as_deref().filter(|_| within(start) && within(last))
 }
 
 /// Every grid point, normalised, on the calling thread.

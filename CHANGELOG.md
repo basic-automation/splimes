@@ -10,6 +10,16 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Changed
+
+- **Faster output assembly on rayon's pool.** Each output column (timestamps, values,
+  provenance) is now written once, straight into its allocation, instead of being
+  filled with placeholders and overwritten, and the provenance walk compares offsets in
+  `i64` whenever the kernel does. `Parallel` calls of 64 Ki grid points and more take
+  10–25% less time (16 Mi points: 70.8 → 53.5 ms); `Cpu` is unchanged
+  ([BENCHMARKS.md](BENCHMARKS.md#output-assembly-in-one-pass-unreleased)). Results are
+  unchanged.
+
 ### Fixed
 
 - **A GPU device lost mid-call is an error, never stale values.** splimes checked for

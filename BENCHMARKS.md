@@ -129,6 +129,36 @@ from 6.98 to 5.52 ms. Two smaller cases moved within their noise: the 64 Ki-poin
 `BigDecimal` call (3.77 → 4.00 ms, its `f64` twin ±11%) and the 60-point `Auto` call
 (10.4 → 10.6 µs).
 
+### Output assembly in one pass (unreleased)
+
+Output assembly used to fill all three output columns with placeholders and then
+overwrite them. It now writes each column once, straight into its allocation, with
+rayon's indexed `collect_into_vec` / `unzip_into_vecs`, and the provenance walk compares
+`i64` offsets whenever the kernel does. Before (`main` at 1829232, 1.1.0) and after, the
+same benchmarks, interleaved: three rounds of before, after, after, before, criterion
+medians, then the median and the best of the runs. Two runs taken while another
+process's `rustc` held 9–13 cores are left out, so each cell is 5 or 6 runs.
+
+| Benchmark | Before, median | After, median | Before, best | After, best |
+|-----------|---------:|---------:|---------:|---------:|
+| `backends/parallel`, 65,536 points | 0.94 ms | 0.77 ms | 0.83 ms | 0.55 ms |
+| `backends/parallel`, 1,048,576 points | 5.65 ms | 5.11 ms | 5.46 ms | 4.68 ms |
+| `backends/parallel`, 16,777,216 points | 70.8 ms | 53.5 ms | 68.5 ms | 52.2 ms |
+| `backends/parallel`, 4,096 points | 0.139 ms | 0.144 ms | 0.138 ms | 0.143 ms |
+| `backends/cpu`, 1,048,576 points | 23.0 ms | 22.7 ms | 22.7 ms | 21.4 ms |
+| `backends/cpu`, 16,777,216 points | 343 ms | 343 ms | 337 ms | 341 ms |
+| `methods`, `Linear` / `Quadratic` / `Cubic` | 4.50 / 5.78 / 5.53 ms | 3.90 / 4.88 / 5.47 ms | 4.11 / 5.20 / 5.10 ms | 3.67 / 4.45 / 4.78 ms |
+| `methods/cpu`, `Linear` / `Quadratic` / `Cubic` | 13.4 / 21.6 / 23.2 ms | 13.4 / 20.5 / 22.7 ms | 12.2 / 20.0 / 21.7 ms | 13.0 / 20.3 / 22.5 ms |
+
+So `Parallel` calls of 64 Ki points and more take 10–25% less time (the medians), and
+`Cpu` is unchanged within this session's run-to-run spread (±6%). A 4,096-point `Parallel` call costs about 5 µs more
+(two parallel passes instead of one); `Auto` runs grids that small on `Cpu`.
+
+Measured 2026-10-10, 00:29–01:06, on the machine above with rustc 1.99.0 (stable),
+load average 1.4 before the runs, with no other process above 40% of a core apart from
+the excluded `rustc` window and brief blips (Steam, Prowlarr). `cargo bench --bench
+interpolation -- backends/parallel`, `-- backends/cpu` and `-- methods` reproduce it.
+
 ## `BigDecimal` at the edges
 
 The same cubic interpolation through `run` (`BigDecimal` in and out) and `run_f64`,
