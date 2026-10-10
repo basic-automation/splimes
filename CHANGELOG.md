@@ -10,6 +10,17 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A GPU device lost mid-call is an error, never stale values.** splimes checked for
+  device loss only when a call started. wgpu 30 can report a result buffer's mapping as
+  successful although the device was lost before the mapping was processed
+  ([gfx-rs/wgpu#10301](https://github.com/gfx-rs/wgpu/pull/10301), fixed after 30.0.1),
+  and the buffer then holds what it held before: for a pooled buffer, an earlier call's
+  results. splimes now also checks after every read-back, so a call during which the
+  device is lost returns `Error::GpuUnavailable` (`Backend::Auto` reruns it on the CPU
+  and reports why).
+
 ## [1.1.0] - 2026-10-08
 
 ### Added
