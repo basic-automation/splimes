@@ -102,7 +102,9 @@
 //! windows at the 1,024× gap limit. It fails if a bound is exceeded. `tests/properties.rs`
 //! checks the same bound, and the input and provenance rules above, on 1,024 generated
 //! series of the input the docs promise to accept: unsorted, with duplicate instants,
-//! single points and constant values.
+//! single points and constant values. It also checks that a refused request (each error
+//! above that input can cause) gets the same error, naming the same point, on every
+//! backend and precision and through every entry point.
 //!
 //! # Backends
 //!
