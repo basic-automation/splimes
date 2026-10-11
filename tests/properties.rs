@@ -285,3 +285,30 @@ fn every_backend_refuses_the_same_input() {
 	}
 	println!("{} refusals, {} configurations, {checked} outcomes checked", cases.len(), configurations.len());
 }
+
+/// A GPU chunk larger than one 16 Ki-point block of staged grid times (the default chunk is
+/// 4 Mi points) computes what the CPU does at every point, across block boundaries and in
+/// the tail. Grids in the other GPU tests fit in one block.
+#[test]
+fn gpu_chunks_of_many_staging_blocks_match_the_cpu() {
+	let Some(info) = common::gpu_or_skip("gpu_chunks_of_many_staging_blocks_match_the_cpu") else { return };
+	let ts: Vec<DateTime<Utc>> = (0..400_i64).map(|i| epoch() + TimeDelta::milliseconds(i * 250 + (i * 7_919) % 200)).collect();
+	let vs: Vec<f64> = (0..400).map(|i| (f64::from(i) * 0.21).sin()).collect();
+	// Three whole blocks and a tail, on a millisecond grid.
+	let (start, end) = (ts[0], ts[0] + TimeDelta::milliseconds(3 * 16 * 1024 + 123 - 1));
+	let mut precisions = vec![Precision::F32];
+	if info.supports_f64 {
+		precisions.push(Precision::F64);
+	}
+	for spline in [Spline::Linear, Spline::Cubic, Spline::Polynomial(5, None)] {
+		let cpu = Interpolator::new(spline, Resolution::Milliseconds).backend(Backend::Cpu).run_f64(&ts, &vs, start, end).expect("cpu");
+		for &precision in &precisions {
+			let gpu = Interpolator::new(spline, Resolution::Milliseconds).backend(Backend::Gpu).gpu_precision(precision).run_f64(&ts, &vs, start, end).expect("gpu");
+			assert_eq!((gpu.len(), gpu.backend(), gpu.points_recomputed_in_f64()), (3 * 16 * 1024 + 123, Backend::Gpu, 0), "{spline} {precision}");
+			let tolerance = bound(precision) * 100.0;
+			for (k, (g, c)) in gpu.values().iter().zip(cpu.values()).enumerate() {
+				assert!((g - c).abs() <= tolerance, "{spline} {precision}, grid point {k}: GPU {g} vs CPU {c}");
+			}
+		}
+	}
+}
