@@ -461,6 +461,15 @@ mod tests {
 		let free = Method { window: 9, hold: false, bounds: None };
 		let v = eval(data, &free, far, 9, &mut Window::new());
 		assert!(v.is_finite() && v > 1e290, "{v}");
+		// With every value 10⁸ times larger the value is ~2.5e306, but the unscaled terms
+		// (beyond 1e308) overflow and cancel to NaN: only the scaled form gets there, and it
+		// is linear in the values.
+		let large: Vec<f64> = y.iter().map(|v| v * 1e8).collect();
+		for (t, p) in [(far, 9), (-far, 0)] {
+			let at = |y| eval(Data { offsets: &o, y, inv_h: 1e3 }, &free, t, p, &mut Window::new());
+			let (v, further) = (at(&y), at(&large));
+			assert!(further.is_finite() && (further / v - 1e8).abs() <= 1e-6 * 1e8, "at {t}: {further} vs {v}");
+		}
 		let bounded = Method { window: 9, hold: false, bounds: Some((-2.0, 2.0)) };
 		assert_eq!(eval(data, &bounded, far, 9, &mut Window::new()), 2.0, "clamps to the upper bound");
 		assert_eq!(eval(data, &bounded, -far, 0, &mut Window::new()), 2.0, "an even-degree polynomial rises on both sides");
