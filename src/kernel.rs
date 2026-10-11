@@ -361,6 +361,7 @@ pub fn repair<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, out:
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::{Spline, prepare::Knots, time::Grid};
 
 	const fn method(window: usize) -> Method {
 		Method { window, hold: false, bounds: None }
@@ -446,6 +447,73 @@ mod tests {
 		let o = [0, 10, 20, 30];
 		let y = [0.0, 0.0, 0.0, 1.0];
 		assert!((at(&o, &y, &method(3), 15) - -0.125).abs() < 1e-15);
+	}
+
+	/// 20,000 knots a second apart, a gap of 2,000,000 s, then five more a second apart: the
+	/// mean spacing is ~101 s, so the one-second gaps are within the `f32` limit and the
+	/// big one (~20,000× the mean) is not.
+	fn one_bad_gap() -> (Vec<chrono::DateTime<chrono::Utc>>, Vec<f64>) {
+		let secs: Vec<i64> = (0..20_000).chain((0..5).map(|i| 21_999 + 2_000_000 - 2_000 + i)).collect();
+		let values = secs.iter().map(|&s| (s as f64 * 0.37).sin()).collect();
+		(secs.iter().map(|&s| chrono::DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(s)).collect(), values)
+	}
+
+	#[test]
+	fn f32_flags_exactly_the_windows_across_a_bad_gap() {
+		let (ts, vs) = one_bad_gap();
+		let knots = Knots::new(ts.len(), |i| ts[i], |i| &vs[i], false).expect("valid");
+		assert_eq!(knots.offsets[20_000] - knots.offsets[19_999], 2_000_000 * 1_000_000_000);
+		// A cubic window starting at knot s spans gaps s, s+1 and s+2, so it is unsafe when
+		// one of them is gap 19,999.
+		let unsafe_windows = f32_unsafe_windows(&knots, &Method::new(Spline::Cubic, &knots)).expect("one gap is out of range");
+		assert_eq!(unsafe_windows.len(), ts.len() - 3);
+		let flagged: Vec<usize> = (0..unsafe_windows.len()).filter(|&s| unsafe_windows[s]).collect();
+		assert_eq!(flagged, [19_997, 19_998, 19_999]);
+		// Linear needs only its own segment.
+		let linear = f32_unsafe_windows(&knots, &Method::new(Spline::Linear, &knots)).expect("one gap is out of range");
+		assert_eq!((0..linear.len()).filter(|&s| linear[s]).collect::<Vec<_>>(), [19_999]);
+		// Evenly spaced knots need no check at all.
+		let even = Knots::new(4, |i| ts[i], |i| &vs[i], false).expect("valid");
+		assert_eq!(f32_unsafe_windows(&even, &Method::new(Spline::Cubic, &even)), None);
+	}
+
+	#[test]
+	fn repair_restores_exactly_what_the_cpu_computes() {
+		let (ts, vs) = one_bad_gap();
+		let knots = Knots::new(ts.len(), |i| ts[i], |i| &vs[i], false).expect("valid");
+		let method = Method::new(Spline::Cubic, &knots);
+		// A one-second grid across all the knots and beyond, so it crosses the bad gap.
+		let grid = Grid::new(ts[0] - chrono::TimeDelta::seconds(500), ts[ts.len() - 1] + chrono::TimeDelta::seconds(500), crate::Resolution::Seconds).expect("a grid");
+		let mut expected = vec![0.0; grid.len];
+		eval_serial(&knots, &grid, &method, &mut expected);
+
+		// Non-finite values are recomputed wherever they are, each from its own window.
+		let broken = [0, 7, 12_345, grid.len / 2, grid.len - 1];
+		let mut out = expected.clone();
+		for (k, &i) in broken.iter().enumerate() {
+			out[i] = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][k % 3];
+		}
+		assert_eq!(repair(&knots, &grid, &method, &mut out, None), broken.len());
+		assert!(out.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()), "non-finite points recomputed as the CPU computes them");
+
+		// With unsafe windows, every point in one is recomputed (even a plausible finite
+		// value), and no other point is touched.
+		let unsafe_windows = f32_unsafe_windows(&knots, &method).expect("one gap is out of range");
+		let mut out = vec![0.0; grid.len];
+		let repaired = repair(&knots, &grid, &method, &mut out, Some(&unsafe_windows));
+		let n = knots.offsets.len();
+		let mut in_unsafe = 0;
+		for (k, t) in grid.offsets(knots.t0, 0).take(grid.len).enumerate() {
+			let p = knots.offsets.partition_point(|&o| o <= t);
+			if unsafe_windows[window_start(n, method.window, p)] {
+				in_unsafe += 1;
+				assert_eq!(out[k].to_bits(), expected[k].to_bits(), "grid point {k}");
+			} else {
+				assert_eq!(out[k].to_bits(), 0.0_f64.to_bits(), "grid point {k} is in a safe window");
+			}
+		}
+		assert!(in_unsafe > 0);
+		assert_eq!(repaired, in_unsafe);
 	}
 
 	#[test]
