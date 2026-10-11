@@ -10,6 +10,11 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Changed
+
+- The `gpu` feature's `pollster` dependency is now 1.x (was 0.4). splimes only uses
+  `pollster::block_on`, which 1.0 didn't change; nothing in splimes' API depends on it.
+
 ## [1.1.0] - 2026-10-08
 
 ### Added
