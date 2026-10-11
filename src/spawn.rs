@@ -332,6 +332,30 @@ mod tests {
 	}
 
 	#[test]
+	fn wakes_the_latest_waker() {
+		// An executor may move a task between polls, so the waker of the last poll is the one
+		// to wake; the first one may belong to a thread that no longer runs the task.
+		let (release, released) = mpsc::channel::<()>();
+		let mut f: InterpolationFuture<f64> = InterpolationFuture::spawn(false, move || {
+			let _ = released.recv_timeout(PATIENCE);
+			Err(Error::NoPoints)
+		});
+		let (first, latest) = (Arc::new(Unpark(thread::current(), AtomicUsize::new(0))), Arc::new(Unpark(thread::current(), AtomicUsize::new(0))));
+		for unpark in [&first, &latest] {
+			let waker = Waker::from(Arc::clone(unpark));
+			assert!(Pin::new(&mut f).poll(&mut Context::from_waker(&waker)).is_pending());
+		}
+		release.send(()).expect("the job is waiting");
+		let deadline = Instant::now() + PATIENCE;
+		while latest.1.load(Ordering::SeqCst) == 0 {
+			assert!(Instant::now() < deadline, "the latest waker was never woken");
+			thread::park_timeout(Duration::from_millis(10));
+		}
+		assert_eq!(first.1.load(Ordering::SeqCst), 0, "a stale waker was woken");
+		assert_eq!(block_on(&mut f).0, Err(Error::NoPoints));
+	}
+
+	#[test]
 	fn a_second_poll_after_completion_is_an_error() {
 		let mut f = Interpolator::new(Spline::Linear, Resolution::Seconds).spawn_f64(vec![at(0), at(1)], vec![0.0, 1.0], at(0), at(1));
 		let (first, _) = block_on(&mut f);
