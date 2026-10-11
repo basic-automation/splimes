@@ -103,6 +103,7 @@ change to what any method computes.
 - [x] **`spawn` on the GPU** (`tests/gpu.rs`): sixteen `Backend::Gpu` futures in flight at once on rayon's pool, awaited on one thread, each matching the CPU
 - [x] **This release's fast paths change nothing** (`tests/api.rs`): 100,000 shuffled inputs with every instant duplicated give bit-identical results on `Cpu` (serial preparation) and `Parallel` (parallel); a 300-year grid (the `i128` kernel) and a 44-year one (`i64`) give bit-identical values at their shared instants
 - [x] **`f32` windows at the 1,024× gap limit** (`tests/contract.rs`): just inside it (1,000×) the `f32` kernel computes every window and stays within 1.6e-7 of the 1e-5 bound; just outside (1,100×) the windows go to `f64`. The fixtures stopped at 60×
+- [x] **`calibrate()` is tested** (`src/calibrate.rs`, `tests/calibrate.rs`): until now nothing ran it. Its threshold rule (a backend wins from the smallest size where it is faster there and at every larger size; the GPU must beat the faster CPU backend; an unmeasured precision is never chosen) is a pure function with unit tests, and one end-to-end run checks the eight documented sizes, that `Auto` uses what it returns, and that the GPU is measured in exactly the precisions it supports
 - [ ] WeftDB persists `Spline`: if it stores it as JSON through serde_json, enable serde_json's `float_roundtrip` feature there, or a stored `Polynomial` bounds factor can come back an ulp off *(owner: WeftDB repository)*
 
 ---
