@@ -13,7 +13,8 @@
 //! - `run` and `run_f64` agree;
 //! - every value is within the published bound of the exact reference;
 //! - a request the docs refuse gets the same error, naming the same point, on every
-//!   backend and precision and through `run`, `run_f64`, `spawn` and `spawn_f64`.
+//!   backend and precision and through every entry point (`run`, `run_f64`, `spawn`,
+//!   `spawn_f64`, and the `tokio` feature's `run_async` and `run_f64_async`).
 
 mod common;
 
@@ -210,19 +211,26 @@ fn the_generator_covers_the_edge_cases() {
 	}
 }
 
-/// Every way of running `interpolator` on one input: `run`, `run_f64`, `spawn` and
-/// `spawn_f64`, each reduced to its error or the result's length. `points` feeds the
-/// decimal entry points and `columns` the `f64` ones; either may be absent where the input
-/// has no form for it (a NaN isn't a `BigDecimal`, 1e400 isn't an `f64`).
+/// Every way of running `interpolator` on one input: `run`, `run_f64`, `spawn`,
+/// `spawn_f64` and, with the `tokio` feature, `run_async` and `run_f64_async`, each
+/// reduced to its error or the result's length. `points` feeds the decimal entry points
+/// and `columns` the `f64` ones; either may be absent where the input has no form for it
+/// (a NaN isn't a `BigDecimal`, 1e400 isn't an `f64`).
 fn every_entry_point(interpolator: Interpolator, points: Option<&[Point]>, columns: Option<(&[DateTime<Utc>], &[f64])>, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<(&'static str, Result<usize, Error>)> {
 	let mut out = Vec::new();
+	#[cfg(feature = "tokio")]
+	let runtime = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
 	if let Some(points) = points {
 		out.push(("run", interpolator.run(points, start, end).map(|r| r.len())));
 		out.push(("spawn", common::block_on(interpolator.spawn(points.to_vec(), start, end)).map(|r| r.len())));
+		#[cfg(feature = "tokio")]
+		out.push(("run_async", runtime.block_on(interpolator.run_async(points.to_vec(), start, end)).map(|r| r.len())));
 	}
 	if let Some((ts, vs)) = columns {
 		out.push(("run_f64", interpolator.run_f64(ts, vs, start, end).map(|r| r.len())));
 		out.push(("spawn_f64", common::block_on(interpolator.spawn_f64(ts.to_vec(), vs.to_vec(), start, end)).map(|r| r.len())));
+		#[cfg(feature = "tokio")]
+		out.push(("run_f64_async", runtime.block_on(interpolator.run_f64_async(ts.to_vec(), vs.to_vec(), start, end)).map(|r| r.len())));
 	}
 	out
 }
