@@ -24,6 +24,13 @@ supported Rust version is a minor-version change.
   parses to that), was refused with `Error::ValueOutOfRange` as if it were beyond
   `f64`'s range. It is zero, and is now interpolated as zero; a raw point still returns
   the caller's own decimal.
+- Series whose values are subnormal and within a few ulps of each other came back as
+  zero. Halving their range for normalisation rounded it to zero, and the kernel then
+  computed on subnormal values, which its products rounded away: the cubic through 0, 0,
+  2⁻¹⁰⁷⁴, −2⁻¹⁰⁷⁴ extrapolated to 0 instead of 11 × 2⁻¹⁰⁷⁴. A constant series of 2⁻¹⁰⁷⁴
+  also came back as 0. Both are now computed like any other series, on every backend.
+  Results for every other input are unchanged, bit for bit: the release contract run's
+  tables are identical before and after.
 
 ## [1.1.0] - 2026-10-08
 

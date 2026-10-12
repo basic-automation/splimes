@@ -158,6 +158,39 @@ fn a_grid_too_large_to_allocate_is_refused() {
 	}
 }
 
+/// Values only a few subnormal ulps apart (`eta` = 2⁻¹⁰⁷⁴, the smallest positive `f64`)
+/// are a series like any other. The cubic through 0, 0, eta, −eta, 1.5 spacings before
+/// its first knot, is exactly 10.625 eta, which rounds to 11 eta on every backend and
+/// precision. Their half-width used to round to zero, and the series came back as 0; a
+/// constant series of eta did too.
+#[test]
+fn subnormal_values_are_not_rounded_away() {
+	let eta = f64::from_bits(1);
+	let ts: Vec<_> = (0..4).map(at).collect();
+	let mut runs = vec![(Backend::Cpu, Precision::F64), (Backend::Parallel, Precision::F64)];
+	if let Some(info) = common::gpu_or_skip("subnormal_values_are_not_rounded_away") {
+		runs.push((Backend::Gpu, Precision::F32));
+		if info.supports_f64 {
+			runs.push((Backend::Gpu, Precision::F64));
+		}
+	}
+	for (backend, precision) in runs {
+		let cubic = Interpolator::new(Spline::Polynomial(3, None), Resolution::Milliseconds).backend(backend).gpu_precision(precision);
+		let at_minus_1_5 = at(0) - TimeDelta::milliseconds(1_500);
+		let out = cubic.run_f64(&ts, &[0.0, 0.0, eta, -eta], at_minus_1_5, at_minus_1_5).expect("runs");
+		assert_eq!(out.values(), &[11.0 * eta], "{backend} {precision}");
+		// And the midpoint of 0 and eta is a tie, which rounds to even: 0.
+		let out = Interpolator::new(Spline::Linear, Resolution::Milliseconds).backend(backend).gpu_precision(precision).run_f64(&ts, &[0.0, eta, 0.0, eta], at(0), at(1)).expect("runs");
+		assert_eq!(out.values()[500], 0.0, "{backend} {precision}");
+		assert_eq!(out.values()[1_000], eta, "{backend} {precision}: a raw point");
+		// A constant series is that constant everywhere, inside the data and out.
+		for constant in [eta, -3.0 * eta, f64::MIN_POSITIVE + eta] {
+			let out = Interpolator::new(Spline::Polynomial(5, None), Resolution::Milliseconds).backend(backend).gpu_precision(precision).run_f64(&ts, &[constant; 4], at(-1), at(4)).expect("runs");
+			assert!(out.values().iter().all(|v| *v == constant), "{backend} {precision}: {constant:e}");
+		}
+	}
+}
+
 #[test]
 fn errors() {
 	let two = points(&[(0, "0"), (1, "1")]);
