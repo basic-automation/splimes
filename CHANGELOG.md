@@ -10,6 +10,28 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Added
+
+- `examples/gpu.rs`: the GPU backend end to end. It configures and starts the GPU, runs
+  a cubic resample of 864,001 points on it in `f64` and `f32`, and compares the results
+  with the CPU. It reports what actually ran (precision, points recomputed in `f64`, and
+  `Backend::Auto`'s choice and any fallback) and the buffer pool's counters.
+  `cargo run --release --example gpu`.
+
+### Fixed
+
+- A `BigDecimal` zero written with a large exponent, such as `0e400` (`"0E+400"`
+  parses to that), was refused with `Error::ValueOutOfRange` as if it were beyond
+  `f64`'s range. It is zero, and is now interpolated as zero; a raw point still returns
+  the caller's own decimal.
+- Series whose values are subnormal and within a few ulps of each other came back as
+  zero. Halving their range for normalisation rounded it to zero, and the kernel then
+  computed on subnormal values, which its products rounded away: the cubic through 0, 0,
+  2⁻¹⁰⁷⁴, −2⁻¹⁰⁷⁴ extrapolated to 0 instead of 11 × 2⁻¹⁰⁷⁴. A constant series of 2⁻¹⁰⁷⁴
+  also came back as 0. Both are now computed like any other series, on every backend.
+  Results for every other input are unchanged, bit for bit: the release contract run's
+  tables are identical before and after.
+
 ## [1.1.0] - 2026-10-08
 
 ### Added

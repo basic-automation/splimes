@@ -142,6 +142,55 @@ fn extrapolation_semantics() {
 	assert_eq!(value(Spline::Polynomial(2, Some(0.5)), -5), 13.5, "the parabola t² is 25 at -5 too");
 }
 
+/// A grid whose length fits in `usize` but whose columns can't be allocated (a thousand
+/// years of microseconds: 3.2 × 10¹⁶ points, 250 PB of `f64`s, beyond any 64-bit address
+/// space) is `OutputTooLarge` with its exact length on every backend, not an abort. The
+/// nanosecond grid in `errors` is refused earlier, for not fitting in `usize` at all.
+#[test]
+fn a_grid_too_large_to_allocate_is_refused() {
+	let two = points(&[(0, "0"), (1, "1")]);
+	let (start, end) = (at(0), at(0) + TimeDelta::days(365 * 1000));
+	let points = 365_000 * 86_400 * 1_000_000 + 1;
+	for backend in [Backend::Cpu, Backend::Parallel, Backend::Auto, Backend::Gpu] {
+		let interpolator = Interpolator::new(Spline::Cubic, Resolution::Microseconds).backend(backend);
+		assert_eq!(interpolator.run(&two, start, end), Err(Error::OutputTooLarge { points }), "{backend}");
+		assert_eq!(interpolator.run_f64(&[at(0), at(1)], &[0.0, 1.0], start, end), Err(Error::OutputTooLarge { points }), "{backend}");
+	}
+}
+
+/// Values only a few subnormal ulps apart (`eta` = 2⁻¹⁰⁷⁴, the smallest positive `f64`)
+/// are a series like any other. The cubic through 0, 0, eta, −eta, 1.5 spacings before
+/// its first knot, is exactly 10.625 eta, which rounds to 11 eta on every backend and
+/// precision. Their half-width used to round to zero, and the series came back as 0; a
+/// constant series of eta did too.
+#[test]
+fn subnormal_values_are_not_rounded_away() {
+	let eta = f64::from_bits(1);
+	let ts: Vec<_> = (0..4).map(at).collect();
+	let mut runs = vec![(Backend::Cpu, Precision::F64), (Backend::Parallel, Precision::F64)];
+	if let Some(info) = common::gpu_or_skip("subnormal_values_are_not_rounded_away") {
+		runs.push((Backend::Gpu, Precision::F32));
+		if info.supports_f64 {
+			runs.push((Backend::Gpu, Precision::F64));
+		}
+	}
+	for (backend, precision) in runs {
+		let cubic = Interpolator::new(Spline::Polynomial(3, None), Resolution::Milliseconds).backend(backend).gpu_precision(precision);
+		let at_minus_1_5 = at(0) - TimeDelta::milliseconds(1_500);
+		let out = cubic.run_f64(&ts, &[0.0, 0.0, eta, -eta], at_minus_1_5, at_minus_1_5).expect("runs");
+		assert_eq!(out.values(), &[11.0 * eta], "{backend} {precision}");
+		// And the midpoint of 0 and eta is a tie, which rounds to even: 0.
+		let out = Interpolator::new(Spline::Linear, Resolution::Milliseconds).backend(backend).gpu_precision(precision).run_f64(&ts, &[0.0, eta, 0.0, eta], at(0), at(1)).expect("runs");
+		assert_eq!(out.values()[500], 0.0, "{backend} {precision}");
+		assert_eq!(out.values()[1_000], eta, "{backend} {precision}: a raw point");
+		// A constant series is that constant everywhere, inside the data and out.
+		for constant in [eta, -3.0 * eta, f64::MIN_POSITIVE + eta] {
+			let out = Interpolator::new(Spline::Polynomial(5, None), Resolution::Milliseconds).backend(backend).gpu_precision(precision).run_f64(&ts, &[constant; 4], at(-1), at(4)).expect("runs");
+			assert!(out.values().iter().all(|v| *v == constant), "{backend} {precision}: {constant:e}");
+		}
+	}
+}
+
 #[test]
 fn errors() {
 	let two = points(&[(0, "0"), (1, "1")]);
@@ -154,6 +203,10 @@ fn errors() {
 	assert_eq!(cpu(Spline::Polynomial(MAX_POLYNOMIAL_DEGREE + 1, None)).run(&two, at(0), at(1)), Err(Error::InvalidDegree { degree: MAX_POLYNOMIAL_DEGREE + 1, max: MAX_POLYNOMIAL_DEGREE }));
 	assert!(matches!(cpu(Spline::Polynomial(2, Some(f64::INFINITY))).run(&two, at(0), at(1)), Err(Error::InvalidBoundsFactor(_))));
 	assert_eq!(cpu(Spline::Linear).run(&points(&[(0, "1"), (1, "1e400")]), at(0), at(1)), Err(Error::ValueOutOfRange { timestamp: at(1) }));
+	// Zero written with a huge exponent is zero, not out of range.
+	let zero = cpu(Spline::Linear).run(&points(&[(0, "0e400"), (2, "4")]), at(0), at(2)).expect("0e400 is zero");
+	assert_eq!(zero.values()[1], dec("2"));
+	assert_eq!(zero.values()[0].as_bigint_and_exponent(), dec("0e400").as_bigint_and_exponent(), "a raw point keeps the caller's own digits and scale");
 	assert_eq!(cpu(Spline::Linear).run_f64(&[at(0)], &[1.0, 2.0], at(0), at(1)), Err(Error::LengthMismatch { timestamps: 1, values: 2 }));
 	assert!(matches!(cpu(Spline::Linear).run_f64(&[at(0), at(1)], &[1.0, f64::NAN], at(0), at(1)), Err(Error::ValueOutOfRange { .. })));
 	// A steep line, extended far enough, leaves f64.

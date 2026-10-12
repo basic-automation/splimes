@@ -107,8 +107,18 @@ impl<'a, V: Value> Knots<'a, V> {
 		let (min, max) = raw_values.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
 		// Halved before subtracting so values near ±f64::MAX can't overflow the width.
 		let half_width = max / 2.0 - min / 2.0;
-		let scale = if half_width > 0.0 { half_width } else { 1.0 };
-		let centre = min / 2.0 + max / 2.0;
+		// Halving rounds subnormal values, the smallest of them to zero, and then the kernel
+		// would see subnormal values, which its products round away. So values within a few
+		// subnormal ulps of each other, which aren't constant, are scaled by their full width,
+		// which is exact there, and a constant series is centred on its value exactly.
+		let scale = if half_width > 0.0 {
+			half_width
+		} else if max > min {
+			max - min
+		} else {
+			1.0
+		};
+		let centre = if max > min { min / 2.0 + max / 2.0 } else { min };
 
 		let t0 = distinct[0].0;
 		let offsets: Vec<i128> = distinct.iter().map(|&(n, _, _)| n - t0).collect();
@@ -188,6 +198,26 @@ mod tests {
 		let knots = from_slices(&[at(0), at(1)], &[f64::MAX, -f64::MAX], false).expect("knots");
 		assert!(knots.scale.is_finite() && knots.centre.is_finite());
 		assert_eq!(knots.y, vec![1.0, -1.0]);
+	}
+
+	/// Values a subnormal ulp or two apart halve to zero, but they aren't constant: they
+	/// must normalise to distinct values in `[-1, 1]` that restore exactly. A constant
+	/// series, subnormal or with an odd last bit just above, normalises to zeros, centred
+	/// on its exact value.
+	#[test]
+	fn subnormal_widths_normalise() {
+		let eta = f64::from_bits(1);
+		let odd_normal = f64::MIN_POSITIVE + eta;
+		for vs in [vec![0.0, eta], vec![-eta, eta], vec![0.0, 0.0, eta, -eta], vec![eta, 2.0 * eta, 3.0 * eta], vec![eta, eta], vec![-3.0 * eta, -3.0 * eta], vec![odd_normal, odd_normal]] {
+			let ts: Vec<_> = (0..vs.len()).map(|i| at(i64::try_from(i).expect("small"))).collect();
+			let knots = from_slices(&ts, &vs, false).expect("knots");
+			assert!(knots.y.iter().all(|y| y.is_normal() || *y == 0.0) && knots.y.iter().all(|y| y.abs() <= 1.0), "{vs:?}: {:?}", knots.y);
+			let (lo, hi) = knots.y_range();
+			let constant = vs.iter().all(|v| v.to_bits() == vs[0].to_bits());
+			assert!(if constant { knots.y.iter().all(|y| *y == 0.0) } else { hi - lo >= 1.0 }, "{vs:?}: {:?}", knots.y);
+			let restored: Vec<f64> = knots.y.iter().map(|y| y * knots.scale + knots.centre).collect();
+			assert_eq!(restored, vs);
+		}
 	}
 
 	#[test]

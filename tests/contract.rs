@@ -430,3 +430,85 @@ fn f32_windows_at_the_gap_limit_meet_the_bound() {
 		}
 	}
 }
+
+/// Draws the knot instants of one series.
+type Family = dyn Fn(&mut Rng) -> Vec<DateTime<Utc>>;
+
+/// The bound holds across chrono's whole range, against the exact reference: knots
+/// spread at random over all ~524,000 years; nanosecond bursts at `MIN_UTC` beside
+/// `MAX_UTC`; and nanosecond gaps beside 100,000-year ones. `tests/gpu.rs` checks that the
+/// GPU agrees with the CPU at these extremes; this checks that both are right. In `f32`,
+/// the windows mixing nanosecond and century gaps go to `f64`, and are counted.
+#[test]
+fn extreme_time_spans_meet_the_contract() {
+	let (min, max) = (DateTime::<Utc>::MIN_UTC, DateTime::<Utc>::MAX_UTC);
+	let mut rng = Rng::new(0x5EED_71DE);
+	let ns = |n: u64| TimeDelta::nanoseconds(i64::try_from(n).expect("small"));
+	let families: [(&str, &Family); 3] = [
+		("knots anywhere in chrono's range", &move |r: &mut Rng| {
+			let span = (max - min).num_seconds().unsigned_abs();
+			let mut ts: Vec<_> = (0..12).map(|_| min + TimeDelta::seconds(i64::try_from(r.below(span)).expect("in range")) + ns(r.below(1_000_000_000))).collect();
+			ts.sort();
+			ts
+		}),
+		("nanosecond bursts at MIN_UTC and MAX_UTC", &move |r: &mut Rng| {
+			let mut t = min;
+			let mut ts = vec![t];
+			for _ in 0..5 {
+				t += ns(1 + r.below(5));
+				ts.push(t);
+			}
+			ts.extend((0..6).map(|i| max - TimeDelta::nanoseconds(3 * i)).rev());
+			ts
+		}),
+		("nanosecond gaps beside 100,000-year gaps", &move |r: &mut Rng| {
+			let mut ts = Vec::new();
+			for k in 0..5 {
+				let mut t = min + TimeDelta::days(1_000 + 36_500_000 * k);
+				for _ in 0..3 {
+					ts.push(t);
+					t += ns(1 + r.below(3));
+				}
+			}
+			ts
+		}),
+	];
+	let mut runs = vec![(Backend::Cpu, Precision::F64), (Backend::Parallel, Precision::F64)];
+	if let Some(info) = common::gpu_or_skip("extreme_time_spans_meet_the_contract (GPU part)") {
+		if info.supports_f64 {
+			runs.push((Backend::Gpu, Precision::F64));
+		}
+		runs.push((Backend::Gpu, Precision::F32));
+	}
+	for (label, make) in families {
+		let mut worst = vec![(0.0_f64, 0_usize); runs.len()];
+		for spline in SPLINES {
+			for _ in 0..4 {
+				let timestamps = make(&mut rng);
+				let values: Vec<f64> = timestamps.iter().map(|_| rng.unit() * 2.0 - 1.0).collect();
+				let points: Vec<Point> = timestamps.iter().zip(&values).map(|(&t, &v)| Point::new(t, format!("{v:e}").parse().expect("finite"))).collect();
+				let (lo, hi) = common::value_range(&points);
+				let range = to_f64(&(&hi - &lo));
+				let (first, last) = (timestamps[0], timestamps[timestamps.len() - 1]);
+				let width = (last - first).num_seconds().unsigned_abs();
+				// Instants at random across the knots, and a nanosecond after each knot.
+				let mut instants: Vec<_> = (0..12).map(|_| first + TimeDelta::seconds(i64::try_from(rng.below(width.max(1))).expect("in range"))).collect();
+				instants.extend(timestamps.iter().filter_map(|t| t.checked_add_signed(TimeDelta::nanoseconds(1))).filter(|t| !timestamps.contains(t)));
+				for at in instants {
+					let (exact, lebesgue) = exact_with_lebesgue(&points, spline, at);
+					let exact = to_f64(&exact);
+					for (&(backend, precision), worst) in runs.iter().zip(&mut worst) {
+						let out = Interpolator::new(spline, Resolution::Nanoseconds).backend(backend).gpu_precision(precision).run_f64(&timestamps, &values, at, at).expect("runs");
+						let got = out.values()[0];
+						let err = ((got - exact).abs() - f64::EPSILON * exact.abs()).max(0.0) / (range * lebesgue);
+						assert!(err <= bound(precision, spline.degree()), "{label}, {spline}, {backend} {precision}, at {at}: {got} vs {exact} ({err:.2e} of range · Λ)");
+						*worst = (worst.0.max(err), worst.1 + out.points_recomputed_in_f64());
+					}
+				}
+			}
+		}
+		for (&(backend, precision), (err, recomputed)) in runs.iter().zip(worst) {
+			println!("{label}, {backend} {precision}: worst {err:.2e} of range · Λ, {recomputed} points recomputed in f64");
+		}
+	}
+}

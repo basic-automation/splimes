@@ -137,3 +137,22 @@ fn kernel(device: &wgpu::Device, source: &str) -> Kernel {
 	let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor { label: Some("splimes"), layout: Some(&pipeline_layout), module: &module, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None });
 	Kernel { layout, pipeline }
 }
+
+#[cfg(test)]
+mod tests {
+	/// The device is opened with the adapter's own buffer limits, not wgpu's defaults
+	/// (128 MiB bindings, 256 MiB buffers): `max_binding_bytes` sizes every chunk and
+	/// bounds the knots a call accepts, so it must be what the device really allows, and
+	/// a buffer must be able to hold a whole binding.
+	#[test]
+	fn the_device_has_the_limits_splimes_plans_for() {
+		let Ok(ctx) = super::get() else {
+			eprintln!("the_device_has_the_limits_splimes_plans_for: skipped, no GPU");
+			return;
+		};
+		let limits = ctx.device.limits();
+		eprintln!("{}: storage binding {} bytes, buffer {} bytes", ctx.info.name, limits.max_storage_buffer_binding_size, limits.max_buffer_size);
+		assert_eq!(limits.max_storage_buffer_binding_size, ctx.max_binding_bytes);
+		assert!(limits.max_buffer_size >= ctx.max_binding_bytes, "{limits:?}");
+	}
+}
