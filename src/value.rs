@@ -50,6 +50,11 @@ impl Value for BigDecimal {
 		let (int, scale) = self.as_bigint_and_exponent();
 		let text = int.to_string();
 		let (sign, digits) = text.strip_prefix('-').map_or(("", text.as_str()), |d| ("-", d));
+		// Zero, whatever its scale: `0e400` is zero, not a value beyond f64's range. (It is
+		// the only integer part whose digits start with a 0.)
+		if digits == "0" {
+			return Some(0.0);
+		}
 		// value = d.ddd… × 10^e10. Written that way the exponent stays small whatever the
 		// number of digits, so the parser (which saturates very large exponents) is exact.
 		let e10 = digits.len() as i128 - 1 - i128::from(scale);
@@ -164,10 +169,61 @@ mod tests {
 		assert_eq!(BigDecimal::new(BigInt::from(7), i64::MIN).to_finite_f64(), None);
 	}
 
+	/// xorshift64*: deterministic test data with no dependency.
+	fn next(state: &mut u64) -> u64 {
+		*state ^= *state >> 12;
+		*state ^= *state << 25;
+		*state ^= *state >> 27;
+		state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+	}
+
+	/// Every finite `f64`, as random bit patterns over all exponents and subnormals: the
+	/// hand-rolled fast path gives the decimal that parsing Rust's shortest round-trip text
+	/// gives, and that decimal converts back to the same `f64`.
+	#[test]
+	fn shortest_decimals_of_random_bit_patterns() {
+		let mut state = 0x9E37_79B9_7F4A_7C15;
+		let mut checked = 0;
+		while checked < 200_000 {
+			let v = f64::from_bits(next(&mut state));
+			if !v.is_finite() {
+				continue;
+			}
+			let d = shortest_decimal(v).expect("finite");
+			assert_eq!(d, BigDecimal::from_str(&format!("{v:e}")).expect("parse"), "{v:e}");
+			assert_eq!(d.to_finite_f64(), Some(v), "{v:e}");
+			checked += 1;
+		}
+	}
+
+	/// Random decimals of 1 to 60 digits, scaled from far above `f64::MAX` to far below
+	/// its smallest subnormal: the conversion is the correctly rounded `f64`, as Rust's
+	/// parser reads the plain `digits e exponent` text, and `None` exactly when that is
+	/// infinite.
+	#[test]
+	fn random_decimals_round_correctly() {
+		use bigdecimal::num_bigint::BigInt;
+		let mut state = 0x2545_F491_4F6C_DD1D;
+		for _ in 0..100_000 {
+			let len = 1 + next(&mut state) % 60;
+			let digits: String = (0..len).map(|_| char::from(b'0' + u8::try_from(next(&mut state) % 10).expect("digit"))).collect();
+			let sign = if next(&mut state).is_multiple_of(2) { "" } else { "-" };
+			let scale = i64::try_from(next(&mut state) % 800).expect("small") - 400 + i64::try_from(len).expect("small");
+			let int = BigInt::from_str(&format!("{sign}{digits}")).expect("digits");
+			let expected = format!("{sign}{digits}e{}", -scale).parse::<f64>().expect("parses");
+			let got = BigDecimal::new(int, scale).to_finite_f64();
+			assert_eq!(got, expected.is_finite().then_some(expected), "{sign}{digits}e{}", -scale);
+		}
+	}
+
 	#[test]
 	fn out_of_range_decimals_are_refused() {
 		let huge = BigDecimal::from_str("1e400").expect("parse");
 		assert_eq!(huge.to_finite_f64(), None);
 		assert_eq!(f64::NAN.to_finite_f64(), None);
+		// Zero is zero at any scale: its exponent says nothing about its magnitude.
+		for zero in ["0e400", "0E+311", "-0e500", "0.000e400", "0e-500"] {
+			assert_eq!(BigDecimal::from_str(zero).expect("parse").to_finite_f64(), Some(0.0), "{zero}");
+		}
 	}
 }

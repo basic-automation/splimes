@@ -170,6 +170,10 @@ fn errors() {
 	assert_eq!(cpu(Spline::Polynomial(MAX_POLYNOMIAL_DEGREE + 1, None)).run(&two, at(0), at(1)), Err(Error::InvalidDegree { degree: MAX_POLYNOMIAL_DEGREE + 1, max: MAX_POLYNOMIAL_DEGREE }));
 	assert!(matches!(cpu(Spline::Polynomial(2, Some(f64::INFINITY))).run(&two, at(0), at(1)), Err(Error::InvalidBoundsFactor(_))));
 	assert_eq!(cpu(Spline::Linear).run(&points(&[(0, "1"), (1, "1e400")]), at(0), at(1)), Err(Error::ValueOutOfRange { timestamp: at(1) }));
+	// Zero written with a huge exponent is zero, not out of range.
+	let zero = cpu(Spline::Linear).run(&points(&[(0, "0e400"), (2, "4")]), at(0), at(2)).expect("0e400 is zero");
+	assert_eq!(zero.values()[1], dec("2"));
+	assert_eq!(zero.values()[0].as_bigint_and_exponent(), dec("0e400").as_bigint_and_exponent(), "a raw point keeps the caller's own digits and scale");
 	assert_eq!(cpu(Spline::Linear).run_f64(&[at(0)], &[1.0, 2.0], at(0), at(1)), Err(Error::LengthMismatch { timestamps: 1, values: 2 }));
 	assert!(matches!(cpu(Spline::Linear).run_f64(&[at(0), at(1)], &[1.0, f64::NAN], at(0), at(1)), Err(Error::ValueOutOfRange { .. })));
 	// A steep line, extended far enough, leaves f64.

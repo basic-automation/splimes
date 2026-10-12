@@ -18,6 +18,13 @@ supported Rust version is a minor-version change.
   `Backend::Auto`'s choice and any fallback) and the buffer pool's counters.
   `cargo run --release --example gpu`.
 
+### Fixed
+
+- A `BigDecimal` zero written with a large exponent, such as `0e400` (`"0E+400"`
+  parses to that), was refused with `Error::ValueOutOfRange` as if it were beyond
+  `f64`'s range. It is zero, and is now interpolated as zero; a raw point still returns
+  the caller's own decimal.
+
 ## [1.1.0] - 2026-10-08
 
 ### Added
