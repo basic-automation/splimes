@@ -36,6 +36,8 @@ supported Rust version is a minor-version change.
   10–25% less time (16 Mi points: 70.8 → 53.5 ms); `Cpu` is unchanged
   ([BENCHMARKS.md](BENCHMARKS.md#output-assembly-in-one-pass-unreleased)). Results are
   unchanged.
+- The `gpu` feature's `pollster` dependency is now 1.x (was 0.4). splimes only uses
+  `pollster::block_on`, which 1.0 didn't change; nothing in splimes' API depends on it.
 
 ### Fixed
 

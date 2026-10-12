@@ -559,18 +559,28 @@ mod tests {
 	#[cfg(feature = "gpu")]
 	#[test]
 	fn auto_falls_back_to_the_cpu_when_the_gpu_fails() {
-		crate::auto::FORCE_GPU.set(true);
-		crate::gpu::run::tests::FAIL.set(true);
-		let points = [Point::new(at(0), BigDecimal::from(0)), Point::new(at(10), BigDecimal::from(10))];
-		let auto = Interpolator::new(Spline::Linear, Resolution::Seconds).run(&points, at(0), at(10));
-		let explicit = Interpolator::new(Spline::Linear, Resolution::Seconds).backend(Backend::Gpu).run(&points, at(0), at(10));
-		crate::auto::FORCE_GPU.set(false);
-		crate::gpu::run::tests::FAIL.set(false);
+		let points = [Point::new(at(0), BigDecimal::from(0)), Point::new(at(3), BigDecimal::from(9)), Point::new(at(7), BigDecimal::from(1)), Point::new(at(10), BigDecimal::from(10))];
+		let parallel = Interpolator::new(Spline::Cubic, Resolution::Seconds).backend(Backend::Parallel).run(&points, at(-2), at(12)).expect("runs");
+		for precision in [Precision::F64, Precision::F32] {
+			let interpolator = Interpolator::new(Spline::Cubic, Resolution::Seconds).gpu_precision(precision);
+			crate::auto::FORCE_GPU.set(true);
+			crate::gpu::run::tests::FAIL.set(true);
+			let auto = interpolator.run(&points, at(-2), at(12));
+			let explicit = interpolator.backend(Backend::Gpu).run(&points, at(-2), at(12));
+			crate::auto::FORCE_GPU.set(false);
+			crate::gpu::run::tests::FAIL.set(false);
 
-		let auto = auto.expect("Auto recovers on the CPU");
-		assert_eq!(auto.backend(), Backend::Parallel);
-		assert!(matches!(auto.gpu_fallback(), Some(Error::Gpu(_) | Error::GpuUnavailable(_))), "{:?}", auto.gpu_fallback());
-		assert_eq!(auto.values()[4], BigDecimal::from(4));
-		assert!(explicit.is_err(), "an explicit GPU request reports the failure instead");
+			// The report says what actually ran: rayon in f64, nothing recomputed, and why.
+			let auto = auto.expect("Auto recovers on the CPU");
+			assert_eq!((auto.backend(), auto.precision(), auto.points_recomputed_in_f64()), (Backend::Parallel, Precision::F64, 0), "{precision}");
+			assert_eq!(auto.gpu_fallback(), Some(&Error::Gpu("injected failure".to_owned())), "{precision}");
+			assert_eq!((auto.spline(), auto.requested_spline()), (Spline::Cubic, Spline::Cubic));
+			// And computed exactly what Parallel computes.
+			assert_eq!(auto.values(), parallel.values(), "{precision}");
+			assert_eq!(auto.kinds(), parallel.kinds(), "{precision}");
+			assert_eq!(explicit, Err(Error::Gpu("injected failure".to_owned())), "an explicit GPU request reports the failure instead");
+		}
+		// Without a failure there is nothing to report.
+		assert_eq!(parallel.gpu_fallback(), None);
 	}
 }

@@ -103,7 +103,10 @@
 //! gaps beside 100,000-year ones). It fails if a bound is exceeded. `tests/properties.rs`
 //! checks the same bound, and the input and provenance rules above, on 1,024 generated
 //! series of the input the docs promise to accept: unsorted, with duplicate instants,
-//! single points and constant values, through `run`, `run_f64`, `spawn` and `spawn_f64`.
+//! single points and constant values, through `run`, `run_f64`, `spawn` and `spawn_f64`. It
+//! also checks that a refused request (each error above that input can cause) gets the
+//! same error, naming the same point, on every backend and precision and through every
+//! entry point.
 //! `tests/adversarial.rs` feeds every backend
 //! subnormal and ±`f64::MAX` values, decimals in unusual forms and knots at chrono's
 //! limits, and checks that none panics and every answer keeps the promises above.

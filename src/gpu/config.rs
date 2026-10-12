@@ -110,3 +110,24 @@ pub struct GpuPoolStats {
 	/// Buffer sets freed because the pool was over [`GpuConfig::max_pool_bytes`].
 	pub evicted: u64,
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const MIB: u64 = 1 << 20;
+
+	/// Each preset is what its docs say, so a caller choosing one by its description gets it.
+	#[test]
+	fn presets_are_as_documented() {
+		let preset = |c: GpuConfig| (c.max_pool_bytes, c.chunk_points, c.low_power);
+		assert_eq!(GpuConfig::default(), GpuConfig::DEFAULT);
+		assert_eq!(preset(GpuConfig::DEFAULT), (512 * MIB, 4 << 20, false));
+		assert_eq!(preset(GpuConfig::low_memory()), (128 * MIB, 1 << 20, false));
+		assert_eq!(preset(GpuConfig::minimal()), (32 * MIB, 256 << 10, false));
+		assert_eq!(preset(GpuConfig::high_performance()), (1024 * MIB + MIB, 16 << 20, false));
+		// The setters change one field each.
+		let set = GpuConfig::minimal().with_max_pool_bytes(7).with_chunk_points(9).with_low_power(true);
+		assert_eq!(preset(set), (7, 9, true));
+	}
+}
