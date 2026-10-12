@@ -77,11 +77,23 @@ pub fn ready(precision: Precision) -> bool {
 	try_get().is_some_and(|ctx| ctx.kernel(precision).is_ok())
 }
 
-fn open() -> Result<Context, String> {
+pub fn open() -> Result<Context, String> {
 	let config = super::fix_config();
-	let instance = Instance::new(InstanceDescriptor { flags: wgpu::InstanceFlags::from_build_config().with_env(), ..InstanceDescriptor::new_without_display_handle() });
-	let power_preference = if config.low_power { PowerPreference::LowPower } else { PowerPreference::HighPerformance };
-	let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions { power_preference, compatible_surface: None, force_fallback_adapter: false, apply_limit_buckets: false })).map_err(|e| format!("no GPU adapter: {e}"))?;
+	// wgpu's environment variables apply: `WGPU_BACKEND` limits the graphics APIs tried,
+	// and the debugging and validation flags work as in any wgpu program.
+	let instance = Instance::new(InstanceDescriptor { flags: wgpu::InstanceFlags::from_build_config(), ..InstanceDescriptor::new_without_display_handle() }.with_env());
+	let adapter = match std::env::var(ADAPTER_NAME_VAR) {
+		Ok(wanted) if !wanted.trim().is_empty() => {
+			let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+			let names: Vec<String> = adapters.iter().map(|a| a.get_info().name).collect();
+			// wgpu's own helper for this variable panics when nothing matches; say so instead.
+			adapters.into_iter().find(|a| name_matches(&a.get_info().name, &wanted)).ok_or_else(|| format!("{ADAPTER_NAME_VAR}={wanted:?} matches no adapter (found: {})", if names.is_empty() { "none".to_owned() } else { names.join(", ") }))?
+		}
+		_ => {
+			let power_preference = if config.low_power { PowerPreference::LowPower } else { PowerPreference::HighPerformance };
+			pollster::block_on(instance.request_adapter(&RequestAdapterOptions { power_preference, compatible_surface: None, force_fallback_adapter: false, apply_limit_buckets: false })).map_err(|e| format!("no GPU adapter: {e}"))?
+		}
+	};
 	let adapter_info = adapter.get_info();
 	let supports_f64 = adapter.features().contains(Features::SHADER_F64);
 	let adapter_limits = adapter.limits();
@@ -127,6 +139,15 @@ fn open() -> Result<Context, String> {
 	Ok(Context { device, queue, info, config, f64, f32, max_binding_bytes: adapter_limits.max_storage_buffer_binding_size, lost, pool })
 }
 
+/// Names the adapter to use, as in wgpu's examples: the first adapter whose name contains
+/// the value, ignoring case. Unset or blank, splimes asks wgpu for one by power preference.
+const ADAPTER_NAME_VAR: &str = "WGPU_ADAPTER_NAME";
+
+/// Whether `WGPU_ADAPTER_NAME=wanted` selects the adapter called `name`.
+fn name_matches(name: &str, wanted: &str) -> bool {
+	name.to_lowercase().contains(&wanted.trim().to_lowercase())
+}
+
 /// Compiles one kernel: knot times, knot values, output, params, grid times.
 fn kernel(device: &wgpu::Device, source: &str) -> Kernel {
 	let storage = |binding, read_only| BindGroupLayoutEntry { binding, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None }, count: None };
@@ -140,6 +161,8 @@ fn kernel(device: &wgpu::Device, source: &str) -> Kernel {
 
 #[cfg(test)]
 mod tests {
+	use super::name_matches;
+
 	/// The device is opened with the adapter's own buffer limits, not wgpu's defaults
 	/// (128 MiB bindings, 256 MiB buffers): `max_binding_bytes` sizes every chunk and
 	/// bounds the knots a call accepts, so it must be what the device really allows, and
@@ -154,5 +177,14 @@ mod tests {
 		eprintln!("{}: storage binding {} bytes, buffer {} bytes", ctx.info.name, limits.max_storage_buffer_binding_size, limits.max_buffer_size);
 		assert_eq!(limits.max_storage_buffer_binding_size, ctx.max_binding_bytes);
 		assert!(limits.max_buffer_size >= ctx.max_binding_bytes, "{limits:?}");
+	}
+
+	#[test]
+	fn adapter_names_match_case_insensitively_by_substring() {
+		assert!(name_matches("NVIDIA GeForce RTX 4070 Ti SUPER", "nvidia"));
+		assert!(name_matches("NVIDIA GeForce RTX 4070 Ti SUPER", " RTX 4070 "));
+		assert!(name_matches("llvmpipe (LLVM 20.1.2, 256 bits)", "LLVMpipe"));
+		assert!(!name_matches("llvmpipe (LLVM 20.1.2, 256 bits)", "nvidia"));
+		assert!(!name_matches("AMD Radeon Graphics", "Radeon RX"));
 	}
 }

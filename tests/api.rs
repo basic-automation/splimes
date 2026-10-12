@@ -214,6 +214,24 @@ fn errors() {
 	assert_eq!(cpu(Spline::Linear).run(&steep, at(5), at(5)), Err(Error::NonFiniteResult { timestamp: at(5) }));
 }
 
+/// The names logs and wire formats see: `PointKind`'s `as_str`, `Display` and serde forms
+/// are one lowercase name, and `Backend` and `Precision` display as theirs.
+#[test]
+fn names_are_lowercase_and_agree() {
+	for (kind, name) in [(PointKind::Raw, "raw"), (PointKind::Interpolated, "interpolated"), (PointKind::Extrapolated, "extrapolated")] {
+		assert_eq!(kind.as_str(), name);
+		assert_eq!(kind.to_string(), name);
+		#[cfg(feature = "serde")]
+		{
+			assert_eq!(serde_json::to_string(&kind).expect("serialises"), format!("\"{name}\""));
+			assert_eq!(serde_json::from_str::<PointKind>(&format!("\"{name}\"")).expect("parses"), kind);
+		}
+	}
+	let backends = [Backend::Auto, Backend::Cpu, Backend::Parallel, Backend::Gpu].map(|b| b.to_string());
+	assert_eq!(backends, ["auto", "cpu", "parallel", "gpu"]);
+	assert_eq!([Precision::F64, Precision::F32].map(|p| p.to_string()), ["f64", "f32"]);
+}
+
 #[test]
 fn errors_display_usefully() {
 	let msg = Error::InsufficientPoints { spline: Spline::Cubic, required: 4, available: 3 }.to_string();
@@ -231,6 +249,8 @@ fn cpu_and_parallel_are_bit_identical() {
 		assert_eq!(a.len(), 2_000_001);
 		assert_eq!(a.values(), b.values(), "{spline}");
 		assert_eq!(a.kinds(), b.kinds(), "{spline}");
+		assert_eq!(a.timestamps(), b.timestamps(), "{spline}");
+		assert!(b.timestamps().iter().zip(0..).all(|(&t, k)| t == start + TimeDelta::milliseconds(k)), "{spline}: every grid point, from every rayon job");
 		assert_eq!(b.backend(), Backend::Parallel);
 	}
 }
@@ -270,6 +290,7 @@ fn the_i64_and_i128_paths_agree() {
 			assert!(far.len() > near.len());
 			assert_eq!(near.values(), &far.values()[..near.len()], "{spline} {backend}");
 			assert_eq!(near.kinds(), &far.kinds()[..near.len()], "{spline} {backend}");
+			assert_eq!(near.timestamps(), &far.timestamps()[..near.len()], "{spline} {backend}");
 		}
 	}
 }

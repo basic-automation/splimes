@@ -77,44 +77,6 @@ impl Grid {
 		from_posix_nanos(self.start_nanos + i128::from(self.step_nanos) * k as i128).unwrap_or(self.start)
 	}
 
-	/// Grid points `first..first + len`, in order, never a leap second: each is built from
-	/// its POSIX seconds and nanoseconds, kept by integer addition, on a calendar date
-	/// computed once per day. That is several times cheaper per point than chrono's
-	/// `checked_add_signed`, and gives the same instants as [`at`](Self::at).
-	pub fn timestamps(&self, first: usize, len: usize) -> impl Iterator<Item = DateTime<Utc>> + '_ {
-		const SECONDS_PER_DAY: i64 = 86_400;
-		let nanos = self.start_nanos + i128::from(self.step_nanos) * first as i128;
-		// Grid points are representable instants, so their seconds fit `i64`.
-		let mut secs = i64::try_from(nanos.div_euclid(NANOS_PER_SECOND)).unwrap_or(i64::MAX);
-		#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // In 0..1e9.
-		let mut subsec = nanos.rem_euclid(NANOS_PER_SECOND) as u32;
-		let step_secs = self.step_nanos.div_euclid(1_000_000_000);
-		#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // In 0..1e9.
-		let step_subsec = self.step_nanos.rem_euclid(1_000_000_000) as u32;
-		let mut day: Option<(i64, NaiveDate)> = None;
-		(0..len).map(move |_| {
-			let (days, second_of_day) = (secs.div_euclid(SECONDS_PER_DAY), secs.rem_euclid(SECONDS_PER_DAY));
-			let date = match day {
-				Some((cached, date)) if cached == days => Some(date),
-				_ => {
-					// Midnight of a representable instant's day is representable.
-					let date = DateTime::from_timestamp(days * SECONDS_PER_DAY, 0).map(|t| t.date_naive());
-					day = date.map(|date| (days, date));
-					date
-				}
-			};
-			let time = u32::try_from(second_of_day).ok().and_then(|s| NaiveTime::from_num_seconds_from_midnight_opt(s, subsec));
-			let t = date.zip(time).map_or(self.start, |(date, time)| date.and_time(time).and_utc());
-			subsec += step_subsec;
-			if subsec >= 1_000_000_000 {
-				subsec -= 1_000_000_000;
-				secs = secs.saturating_add(1);
-			}
-			secs = secs.saturating_add(step_secs);
-			t
-		})
-	}
-
 	/// Offset of grid point `k` from `origin` (POSIX nanoseconds), in nanoseconds.
 	pub fn offset_nanos(&self, origin: i128, k: usize) -> i128 {
 		self.start_nanos - origin + i128::from(self.step_nanos) * k as i128
@@ -128,6 +90,66 @@ impl Grid {
 	}
 }
 
+/// Grid timestamps, cheaply, for ascending indices. Each is built from its POSIX seconds
+/// and nanoseconds, kept by integer addition from the previous index, on a calendar date
+/// computed once per day: several times cheaper per point than chrono's
+/// `checked_add_signed`, with the same instants as [`Grid::at`], never a leap second. Any
+/// other index costs a division to seek to.
+pub struct Clock<'g> {
+	grid: &'g Grid,
+	/// The index the state below describes.
+	next: usize,
+	secs: i64,
+	subsec: u32,
+	step_secs: i64,
+	step_subsec: u32,
+	/// The last day number seen and its date.
+	day: Option<(i64, NaiveDate)>,
+}
+
+impl<'g> Clock<'g> {
+	const SECONDS_PER_DAY: i64 = 86_400;
+
+	pub const fn new(grid: &'g Grid) -> Self {
+		let step_secs = grid.step_nanos.div_euclid(1_000_000_000);
+		#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // In 0..1e9.
+		let step_subsec = grid.step_nanos.rem_euclid(1_000_000_000) as u32;
+		Self { grid, next: usize::MAX, secs: 0, subsec: 0, step_secs, step_subsec, day: None }
+	}
+
+	/// Grid point `k`.
+	pub fn at(&mut self, k: usize) -> DateTime<Utc> {
+		if k != self.next {
+			let nanos = self.grid.start_nanos + i128::from(self.grid.step_nanos) * k as i128;
+			// Grid points are representable instants, so their seconds fit `i64`.
+			self.secs = i64::try_from(nanos.div_euclid(NANOS_PER_SECOND)).unwrap_or(i64::MAX);
+			#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // In 0..1e9.
+			let subsec = nanos.rem_euclid(NANOS_PER_SECOND) as u32;
+			self.subsec = subsec;
+		}
+		let (days, second_of_day) = (self.secs.div_euclid(Self::SECONDS_PER_DAY), self.secs.rem_euclid(Self::SECONDS_PER_DAY));
+		let date = match self.day {
+			Some((cached, date)) if cached == days => Some(date),
+			_ => {
+				// Midnight of a representable instant's day is representable.
+				let date = DateTime::from_timestamp(days * Self::SECONDS_PER_DAY, 0).map(|t| t.date_naive());
+				self.day = date.map(|date| (days, date));
+				date
+			}
+		};
+		let time = u32::try_from(second_of_day).ok().and_then(|s| NaiveTime::from_num_seconds_from_midnight_opt(s, self.subsec));
+		let t = date.zip(time).map_or(self.grid.start, |(date, time)| date.and_time(time).and_utc());
+		self.subsec += self.step_subsec;
+		if self.subsec >= 1_000_000_000 {
+			self.subsec -= 1_000_000_000;
+			self.secs = self.secs.saturating_add(1);
+		}
+		self.secs = self.secs.saturating_add(self.step_secs);
+		self.next = k.saturating_add(1);
+		t
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use chrono::{TimeDelta, TimeZone};
@@ -138,11 +160,17 @@ mod tests {
 		Utc.timestamp_opt(secs, 0).single().expect("valid")
 	}
 
+	/// Grid points `first..first + len`, in order, as assembly walks them.
+	fn timestamps(grid: &Grid, first: usize, len: usize) -> impl Iterator<Item = DateTime<Utc>> + '_ {
+		let mut clock = Clock::new(grid);
+		(first..first + len).map(move |k| clock.at(k))
+	}
+
 	#[test]
 	fn grid_is_inclusive_and_anchored_at_start() {
 		let grid = Grid::new(at(1), at(11), Resolution::Seconds).expect("grid");
 		assert_eq!(grid.len, 11);
-		let ts: Vec<_> = grid.timestamps(0, grid.len).collect();
+		let ts: Vec<_> = timestamps(&grid, 0, grid.len).collect();
 		assert_eq!(ts.first(), Some(&at(1)));
 		assert_eq!(ts.last(), Some(&at(11)));
 
@@ -182,7 +210,7 @@ mod tests {
 		let leap = chrono::NaiveDate::MAX.and_hms_nano_opt(23, 59, 59, 1_500_000_000).expect("chrono represents it").and_utc();
 		let max = DateTime::<Utc>::MAX_UTC;
 		let grid = Grid::new(max - TimeDelta::seconds(2), leap, Resolution::Seconds).expect("grid");
-		let ts: Vec<_> = grid.timestamps(0, grid.len).collect();
+		let ts: Vec<_> = timestamps(&grid, 0, grid.len).collect();
 		assert!(ts.windows(2).all(|w| w[0] < w[1]), "{ts:?}");
 		assert!(ts.iter().all(|&t| t <= max));
 		assert!(matches!(Grid::new(leap, leap, Resolution::Seconds), Err(Error::InvalidTimeRange { .. })));
@@ -198,7 +226,7 @@ mod tests {
 		let grid = Grid::new(leap, next + TimeDelta::seconds(2), Resolution::Seconds).expect("grid");
 		assert_eq!(grid.start, next);
 		assert_eq!(grid.len, 3);
-		let ts: Vec<_> = grid.timestamps(0, grid.len).collect();
+		let ts: Vec<_> = timestamps(&grid, 0, grid.len).collect();
 		for (k, (t, o)) in ts.iter().zip(grid.offsets(posix_nanos(next), 0)).enumerate() {
 			assert_eq!(posix_nanos(*t) - posix_nanos(next), o, "point {k}");
 			assert_eq!(*t, grid.at(k));
@@ -206,7 +234,7 @@ mod tests {
 		// An end inside a leap second never lets a point land past it.
 		let before = DateTime::parse_from_rfc3339("2016-12-31T23:59:59Z").expect("valid").to_utc();
 		let grid = Grid::new(before, leap, Resolution::Seconds).expect("grid");
-		assert!(grid.timestamps(0, grid.len).all(|t| posix_nanos(t) <= posix_nanos(leap)));
+		assert!(timestamps(&grid, 0, grid.len).all(|t| posix_nanos(t) <= posix_nanos(leap)));
 	}
 
 	#[test]
@@ -220,11 +248,17 @@ mod tests {
 				let chrono: Vec<_> = std::iter::successors(Some(grid.start), |t| t.checked_add_signed(resolution.step())).take(grid.len).collect();
 				// From the start, and from every offset into the grid.
 				for first in [0, 1, grid.len / 3, grid.len - 1] {
-					let ours: Vec<_> = grid.timestamps(first, grid.len - first).collect();
+					let ours: Vec<_> = timestamps(&grid, first, grid.len - first).collect();
 					assert_eq!(ours, chrono[first..], "{resolution:?} from {start}, point {first}");
 				}
-				for (k, t) in chrono.iter().enumerate().step_by(97) {
-					assert_eq!(*t, grid.at(k), "{resolution:?} from {start}, point {k}");
+				// Seeking: indices out of order, then on from each.
+				let mut clock = Clock::new(&grid);
+				for k in (0..grid.len).step_by(97).rev() {
+					assert_eq!(clock.at(k), chrono[k], "{resolution:?} from {start}, seek to {k}");
+					assert_eq!(chrono[k], grid.at(k));
+					if k + 1 < grid.len {
+						assert_eq!(clock.at(k + 1), chrono[k + 1], "{resolution:?} from {start}, after {k}");
+					}
 				}
 			}
 		}

@@ -54,12 +54,22 @@ impl Method {
 pub trait Nanos: Copy + Ord + Send + Sync + std::ops::Add<Output = Self> + std::ops::Sub<Output = Self> + TryFrom<i128> {
 	/// The nearest `f64`.
 	fn to_f64(self) -> f64;
+
+	/// `v`, saturated to this type's range. Callers only pass offsets that the choice of
+	/// type (see [`narrow_offsets`]) guarantees fit, so this never saturates; it just
+	/// avoids a panic path.
+	fn saturating_from(v: i128) -> Self;
 }
 
 impl Nanos for i128 {
 	#[inline]
 	fn to_f64(self) -> f64 {
 		nanos_to_f64(self)
+	}
+
+	#[inline]
+	fn saturating_from(v: i128) -> Self {
+		v
 	}
 }
 
@@ -69,6 +79,11 @@ impl Nanos for i64 {
 		#[allow(clippy::cast_precision_loss)] // Rounds to nearest, exactly as `nanos_to_f64`.
 		let v = self as f64;
 		v
+	}
+
+	#[inline]
+	fn saturating_from(v: i128) -> Self {
+		Self::try_from(v).unwrap_or(if v < 0 { Self::MIN } else { Self::MAX })
 	}
 }
 
@@ -252,13 +267,20 @@ impl<'k> Offsets<'k> {
 	/// which is nearly always, and `i128` otherwise. Both give the same results.
 	fn new<V: Value>(knots: &'k Knots<'_, V>, grid: &Grid) -> Self {
 		let (start, step) = (grid.offset_nanos(knots.t0, 0), i128::from(grid.step_nanos));
-		let last = grid.offset_nanos(knots.t0, grid.len.saturating_sub(1));
-		let within = |o: i128| (-I64_SPAN..=I64_SPAN).contains(&o);
-		if let (Some(offsets), true, Ok(step_n)) = (knots.offsets64.as_deref(), within(start) && within(last), i64::try_from(step)) {
+		if let (Some(offsets), Ok(step_n)) = (narrow_offsets(knots, grid), i64::try_from(step)) {
 			return Self::I64(Data { offsets, y: &knots.y, inv_h: 1.0 / knots.h }, GridOffsets { start, step, step_n });
 		}
 		Self::I128(knots.data(), GridOffsets { start, step, step_n: step })
 	}
+}
+
+/// The knot offsets as `i64`, if they and every grid point are within [`I64_SPAN`] of the
+/// first knot, so that every offset and difference the kernel and output assembly take
+/// fits an `i64`.
+pub fn narrow_offsets<'k, V: Value>(knots: &'k Knots<'_, V>, grid: &Grid) -> Option<&'k [i64]> {
+	let within = |o: i128| (-I64_SPAN..=I64_SPAN).contains(&o);
+	let (start, last) = (grid.offset_nanos(knots.t0, 0), grid.offset_nanos(knots.t0, grid.len.saturating_sub(1)));
+	knots.offsets64.as_deref().filter(|_| within(start) && within(last))
 }
 
 /// Every grid point, normalised, on the calling thread.
@@ -361,6 +383,7 @@ pub fn repair<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, out:
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::{Spline, prepare::Knots, time::Grid};
 
 	const fn method(window: usize) -> Method {
 		Method { window, hold: false, bounds: None }
@@ -369,6 +392,27 @@ mod tests {
 	/// Evaluates at `t` (nanoseconds), with times scaled by `h`.
 	fn at(o: &[i128], y: &[f64], method: &Method, t: i128) -> f64 {
 		eval(Data { offsets: o, y, inv_h: 0.1 }, method, t, o.partition_point(|&x| x <= t), &mut Window::new())
+	}
+
+	/// The kernel and output assembly take `i64` differences when the knots and every grid
+	/// point lie within [`I64_SPAN`] (about 146 years) of the first knot, on either side,
+	/// and `i128` otherwise. Both give the same results, so only this sees the choice.
+	#[test]
+	fn i64_offsets_when_everything_is_within_the_span() {
+		use chrono::{DateTime, Utc};
+
+		use crate::{Resolution, time::Grid};
+
+		let at = |years: i64| DateTime::<Utc>::from_timestamp(years * 365 * 86_400, 0).expect("valid");
+		let ys = [0.0, 1.0, 2.0];
+		let (near, far) = ([at(0), at(1), at(2)], [at(0), at(1), at(200)]);
+		let near = Knots::new(3, |i| near[i], |i| &ys[i], false).expect("knots");
+		let far = Knots::new(3, |i| far[i], |i| &ys[i], false).expect("knots");
+		let narrow = |knots: &Knots<'_, f64>, start, end| narrow_offsets(knots, &Grid::new(at(start), at(end), Resolution::Days).expect("grid")).is_some();
+		assert!(narrow(&near, -100, 100), "a century either side");
+		assert!(!narrow(&near, -200, 0), "two centuries before");
+		assert!(!narrow(&near, 0, 200), "two centuries after");
+		assert!(!narrow(&far, 0, 1), "knots two centuries apart");
 	}
 
 	#[test]
@@ -448,6 +492,73 @@ mod tests {
 		assert!((at(&o, &y, &method(3), 15) - -0.125).abs() < 1e-15);
 	}
 
+	/// 20,000 knots a second apart, a gap of 2,000,000 s, then five more a second apart: the
+	/// mean spacing is ~101 s, so the one-second gaps are within the `f32` limit and the
+	/// big one (~20,000× the mean) is not.
+	fn one_bad_gap() -> (Vec<chrono::DateTime<chrono::Utc>>, Vec<f64>) {
+		let secs: Vec<i64> = (0..20_000).chain((0..5).map(|i| 21_999 + 2_000_000 - 2_000 + i)).collect();
+		let values = secs.iter().map(|&s| (s as f64 * 0.37).sin()).collect();
+		(secs.iter().map(|&s| chrono::DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(s)).collect(), values)
+	}
+
+	#[test]
+	fn f32_flags_exactly_the_windows_across_a_bad_gap() {
+		let (ts, vs) = one_bad_gap();
+		let knots = Knots::new(ts.len(), |i| ts[i], |i| &vs[i], false).expect("valid");
+		assert_eq!(knots.offsets[20_000] - knots.offsets[19_999], 2_000_000 * 1_000_000_000);
+		// A cubic window starting at knot s spans gaps s, s+1 and s+2, so it is unsafe when
+		// one of them is gap 19,999.
+		let unsafe_windows = f32_unsafe_windows(&knots, &Method::new(Spline::Cubic, &knots)).expect("one gap is out of range");
+		assert_eq!(unsafe_windows.len(), ts.len() - 3);
+		let flagged: Vec<usize> = (0..unsafe_windows.len()).filter(|&s| unsafe_windows[s]).collect();
+		assert_eq!(flagged, [19_997, 19_998, 19_999]);
+		// Linear needs only its own segment.
+		let linear = f32_unsafe_windows(&knots, &Method::new(Spline::Linear, &knots)).expect("one gap is out of range");
+		assert_eq!((0..linear.len()).filter(|&s| linear[s]).collect::<Vec<_>>(), [19_999]);
+		// Evenly spaced knots need no check at all.
+		let even = Knots::new(4, |i| ts[i], |i| &vs[i], false).expect("valid");
+		assert_eq!(f32_unsafe_windows(&even, &Method::new(Spline::Cubic, &even)), None);
+	}
+
+	#[test]
+	fn repair_restores_exactly_what_the_cpu_computes() {
+		let (ts, vs) = one_bad_gap();
+		let knots = Knots::new(ts.len(), |i| ts[i], |i| &vs[i], false).expect("valid");
+		let method = Method::new(Spline::Cubic, &knots);
+		// A one-second grid across all the knots and beyond, so it crosses the bad gap.
+		let grid = Grid::new(ts[0] - chrono::TimeDelta::seconds(500), ts[ts.len() - 1] + chrono::TimeDelta::seconds(500), crate::Resolution::Seconds).expect("a grid");
+		let mut expected = vec![0.0; grid.len];
+		eval_serial(&knots, &grid, &method, &mut expected);
+
+		// Non-finite values are recomputed wherever they are, each from its own window.
+		let broken = [0, 7, 12_345, grid.len / 2, grid.len - 1];
+		let mut out = expected.clone();
+		for (k, &i) in broken.iter().enumerate() {
+			out[i] = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][k % 3];
+		}
+		assert_eq!(repair(&knots, &grid, &method, &mut out, None), broken.len());
+		assert!(out.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()), "non-finite points recomputed as the CPU computes them");
+
+		// With unsafe windows, every point in one is recomputed (even a plausible finite
+		// value), and no other point is touched.
+		let unsafe_windows = f32_unsafe_windows(&knots, &method).expect("one gap is out of range");
+		let mut out = vec![0.0; grid.len];
+		let repaired = repair(&knots, &grid, &method, &mut out, Some(&unsafe_windows));
+		let n = knots.offsets.len();
+		let mut in_unsafe = 0;
+		for (k, t) in grid.offsets(knots.t0, 0).take(grid.len).enumerate() {
+			let p = knots.offsets.partition_point(|&o| o <= t);
+			if unsafe_windows[window_start(n, method.window, p)] {
+				in_unsafe += 1;
+				assert_eq!(out[k].to_bits(), expected[k].to_bits(), "grid point {k}");
+			} else {
+				assert_eq!(out[k].to_bits(), 0.0_f64.to_bits(), "grid point {k} is in a safe window");
+			}
+		}
+		assert!(in_unsafe > 0);
+		assert_eq!(repaired, in_unsafe);
+	}
+
 	#[test]
 	fn far_extrapolation_does_not_cancel_infinities() {
 		// Degree 8 through rising data, 10⁴¹ time units out (Lagrange is invariant under
@@ -461,6 +572,15 @@ mod tests {
 		let free = Method { window: 9, hold: false, bounds: None };
 		let v = eval(data, &free, far, 9, &mut Window::new());
 		assert!(v.is_finite() && v > 1e290, "{v}");
+		// With every value 10⁸ times larger the value is ~2.5e306, but the unscaled terms
+		// (beyond 1e308) overflow and cancel to NaN: only the scaled form gets there, and it
+		// is linear in the values.
+		let large: Vec<f64> = y.iter().map(|v| v * 1e8).collect();
+		for (t, p) in [(far, 9), (-far, 0)] {
+			let at = |y| eval(Data { offsets: &o, y, inv_h: 1e3 }, &free, t, p, &mut Window::new());
+			let (v, further) = (at(&y), at(&large));
+			assert!(further.is_finite() && (further / v - 1e8).abs() <= 1e-6 * 1e8, "at {t}: {further} vs {v}");
+		}
 		let bounded = Method { window: 9, hold: false, bounds: Some((-2.0, 2.0)) };
 		assert_eq!(eval(data, &bounded, far, 9, &mut Window::new()), 2.0, "clamps to the upper bound");
 		assert_eq!(eval(data, &bounded, -far, 0, &mut Window::new()), 2.0, "an even-degree polynomial rises on both sides");

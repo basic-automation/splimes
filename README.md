@@ -23,7 +23,8 @@ extrapolation.
 - **Backends:** one CPU thread, rayon's thread pool, or the GPU via
   [`wgpu`](https://wgpu.rs) (Vulkan, Metal, DX12), picked per call by size or chosen
   explicitly. A GPU failure never panics: automatic selection reruns on the CPU and
-  tells you why.
+  tells you why. With several GPUs, wgpu's `WGPU_ADAPTER_NAME` (or `WGPU_BACKEND`)
+  picks which one.
 - **Values:** `BigDecimal` or `f64`. Computation is in `f64` (or `f32` on the GPU, if
   you ask), against a published, tested error bound. Points that land on an input
   return that input exactly, every digit intact.
@@ -89,6 +90,10 @@ assert_eq!(series.spline(), Spline::Quadratic);
 # Ok::<(), splimes::Error>(())
 ```
 
+`examples/resample.rs` is a small command-line program built on these calls: it reads
+`timestamp,value` lines, in any order, and prints the resampled series with each
+point's provenance (`cargo run --example resample < readings.csv`).
+
 From async code, `spawn` (or `spawn_f64`) runs the work on rayon's pool and returns a
 future that any executor can await, with no feature flag:
 `interpolator.spawn(points, start, end).await?`. Dropping the future cancels work that
@@ -111,8 +116,9 @@ has the precise statement. It is part of the semver promise.
 ## Performance
 
 On a 16-core Ryzen 9 7950X3D with an RTX 4070 Ti SUPER, a cubic resample of 4,096
-irregular points onto a 16.7-million-point grid takes about **100 ms** on rayon's pool,
-against 670 ms on one thread, and a million points about 7–12 ms. Building the output
+irregular points onto a 16.7-million-point grid takes about **55 ms** on rayon's pool,
+against about 340 ms on one thread, and a million points about 5 ms, measured on an
+otherwise quiet machine. Building the output
 (timestamps, values, provenance) costs the same whichever backend computed the values,
 and it dominates, so the GPU gains little: here it at best ties rayon in `f64` and wins
 modestly in `f32` at a million points and more. `Backend::Auto` therefore uses the GPU
@@ -143,7 +149,10 @@ but it has no dependency on the database and works on its own.
 `cargo test` runs anywhere. Without a GPU, the GPU tests skip themselves; set
 `SPLIMES_REQUIRE_GPU=1` to make a missing GPU a failure instead, or
 `SPLIMES_REQUIRE_GPU_F64=1` to require one with `f64` support too (CI sets that, on a
-software Vulkan driver). Formatting uses nightly rustfmt: `cargo +nightly fmt`.
+software Vulkan driver). wgpu's `WGPU_BACKEND` and `WGPU_ADAPTER_NAME` choose which
+GPU the tests (and any program using splimes) run on, for example
+`WGPU_ADAPTER_NAME=llvmpipe` for CI's software driver where it is installed.
+Formatting uses nightly rustfmt: `cargo +nightly fmt`.
 
 ## License
 
