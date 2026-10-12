@@ -103,7 +103,9 @@
 //! gaps beside 100,000-year ones). It fails if a bound is exceeded. `tests/properties.rs`
 //! checks the same bound, and the input and provenance rules above, on 1,024 generated
 //! series of the input the docs promise to accept: unsorted, with duplicate instants,
-//! single points and constant values.
+//! single points and constant values. `tests/adversarial.rs` feeds every backend
+//! subnormal and ±`f64::MAX` values, decimals in unusual forms and knots at chrono's
+//! limits, and checks that none panics and every answer keeps the promises above.
 //!
 //! # Backends
 //!
