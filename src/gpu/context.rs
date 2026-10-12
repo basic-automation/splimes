@@ -77,7 +77,7 @@ pub fn ready(precision: Precision) -> bool {
 	try_get().is_some_and(|ctx| ctx.kernel(precision).is_ok())
 }
 
-fn open() -> Result<Context, String> {
+pub fn open() -> Result<Context, String> {
 	let config = super::fix_config();
 	// wgpu's environment variables apply: `WGPU_BACKEND` limits the graphics APIs tried,
 	// and the debugging and validation flags work as in any wgpu program.

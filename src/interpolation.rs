@@ -1,11 +1,13 @@
-use std::fmt;
+use std::{
+	fmt, sync::atomic::{AtomicUsize, Ordering}
+};
 
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use crate::{
-	Error, Point, PointKind, Resolution, Result, Spline, kernel::{self, Method}, prepare::Knots, time::Grid, value::Value
+	Error, Point, PointKind, Resolution, Result, Spline, kernel::{self, Method, Nanos}, prepare::Knots, time::{Clock, Grid}, value::Value
 };
 
 /// Where an interpolation runs.
@@ -281,59 +283,127 @@ fn filled<T: Clone + Send + Sync>(len: usize, value: T, parallel: bool) -> Resul
 	Ok(v)
 }
 
-/// One chunk of the three output columns, as zipped chunk iterators yield them.
-type Columns<'c, V> = ((&'c mut [DateTime<Utc>], &'c mut [PointKind]), &'c mut [V]);
-
 /// Builds the output columns from the normalised kernel results: timestamps, provenance
 /// by a merge walk against the knots, and values (the caller's own for raw points).
+///
+/// Each column is written once, straight into its allocation: in parallel by rayon's
+/// indexed collects, whose jobs each take a run of consecutive points, so the cursors in
+/// [`Clock`] and [`Walk`] advance by addition and seek only at the start of a run.
 fn assemble<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, normalised: &[f64], run: Run, spline: Spline, requested: Spline) -> Result<Interpolation<V>> {
+	fn reserved<T>(len: usize) -> Result<Vec<T>> {
+		let mut v = Vec::new();
+		v.try_reserve_exact(len).map_err(|_| Error::OutputTooLarge { points: len as u128 })?;
+		Ok(v)
+	}
+	let len = grid.len;
+	let mut columns = Columns { timestamps: reserved(len)?, kinds: reserved(len)?, values: reserved(len)? };
 	let parallel = run.backend != Backend::Cpu;
-	let mut timestamps = filled(grid.len, grid.start, parallel)?;
-	let mut kinds = filled(grid.len, PointKind::Interpolated, parallel)?;
-	let mut values = filled(grid.len, V::placeholder(), parallel)?;
-	// Fills one chunk; on a non-finite value, returns the index of the first one in it.
-	let chunk = |c: usize, ((ts, ks), vs): Columns<'_, V>| -> Result<(), usize> {
-		let first = c * ASSEMBLE_CHUNK;
-		let ys = &normalised[first..first + vs.len()];
-		let offsets = &knots.offsets;
-		let (first_knot, last_knot) = (knots.originals[0], knots.originals[offsets.len() - 1]);
-		let last = offsets[offsets.len() - 1];
-		let mut cursor = None;
-		for (i, (((kind, value), &y), offset)) in ks.iter_mut().zip(vs.iter_mut()).zip(ys).zip(grid.offsets(knots.t0, first)).enumerate() {
-			let mut c = cursor.unwrap_or_else(|| offsets.partition_point(|&o| o < offset));
-			while c < offsets.len() && offsets[c] < offset {
-				c += 1;
-			}
-			cursor = Some(c);
-			if c < offsets.len() && offsets[c] == offset {
-				*kind = PointKind::Raw;
-				*value = knots.originals[c].clone();
-			} else if offset < 0 || offset > last {
-				*kind = PointKind::Extrapolated;
-				// `Cubic` holds the edge values: return them exactly, not their round trip
-				// through the normalised kernel.
-				*value = match (method.hold, offset < 0) {
-					(true, true) => first_knot.clone(),
-					(true, false) => last_knot.clone(),
-					(false, _) => denormalise(knots, y).ok_or(first + i)?,
-				};
-			} else {
-				*value = denormalise(knots, y).ok_or(first + i)?;
-			}
-		}
-		for (t, time) in ts.iter_mut().zip(grid.timestamps(first, vs.len())) {
-			*t = time;
-		}
-		Ok(())
+	// The provenance walk compares offsets in `i64` when they all fit, as the kernel does.
+	let failure = match kernel::narrow_offsets(knots, grid) {
+		Some(offsets) => columns.fill(offsets, knots, grid, method, normalised, parallel),
+		None => columns.fill(&knots.offsets, knots, grid, method, normalised, parallel),
 	};
-
-	// The first failing point in grid order, whichever chunk finishes first, so every
-	// backend reports the same timestamp.
-	let failure = if parallel { timestamps.par_chunks_mut(ASSEMBLE_CHUNK).zip(kinds.par_chunks_mut(ASSEMBLE_CHUNK)).zip(values.par_chunks_mut(ASSEMBLE_CHUNK)).enumerate().filter_map(|(c, cols)| chunk(c, cols).err()).min() } else { timestamps.chunks_mut(ASSEMBLE_CHUNK).zip(kinds.chunks_mut(ASSEMBLE_CHUNK)).zip(values.chunks_mut(ASSEMBLE_CHUNK)).enumerate().find_map(|(c, cols)| chunk(c, cols).err()) };
 	if let Some(k) = failure {
 		return Err(Error::NonFiniteResult { timestamp: grid.at(k) });
 	}
+	let Columns { timestamps, kinds, values } = columns;
 	Ok(Interpolation { timestamps, values, kinds, spline, requested, backend: run.backend, precision: run.precision, gpu_fallback: run.gpu_fallback, recomputed: run.recomputed })
+}
+
+/// The three output columns, allocated but empty until [`fill`](Self::fill).
+struct Columns<V> {
+	timestamps: Vec<DateTime<Utc>>,
+	kinds: Vec<PointKind>,
+	values: Vec<V>,
+}
+
+impl<V: Value> Columns<V> {
+	/// Fills every column, `offsets` being the knots' offsets from the first knot. Returns the
+	/// first point in grid order whose value isn't finite, whichever job meets it first, so
+	/// every backend reports the same timestamp.
+	fn fill<N: Nanos>(&mut self, offsets: &[N], knots: &Knots<'_, V>, grid: &Grid, method: &Method, normalised: &[f64], parallel: bool) -> Option<usize> {
+		let step = N::saturating_from(i128::from(grid.step_nanos));
+		let len = grid.len;
+		if !parallel {
+			// One pass, stopping at the first non-finite value.
+			let (mut clock, mut walk) = (Clock::new(grid), Walk::new(step));
+			for (k, &y) in normalised.iter().enumerate() {
+				let (kind, value) = walk.point(offsets, knots, grid, method, k, y);
+				let Some(value) = value else {
+					return Some(k);
+				};
+				self.timestamps.push(clock.at(k));
+				self.kinds.push(kind);
+				self.values.push(value);
+			}
+			return None;
+		}
+		let failure = AtomicUsize::new(usize::MAX);
+		let point = |walk: &mut Walk<N>, k: usize| -> (PointKind, V) {
+			let (kind, value) = walk.point(offsets, knots, grid, method, k, normalised[k]);
+			let value = value.unwrap_or_else(|| {
+				failure.fetch_min(k, Ordering::Relaxed);
+				V::placeholder()
+			});
+			(kind, value)
+		};
+		(0..len).into_par_iter().with_min_len(ASSEMBLE_CHUNK).map_init(|| Clock::new(grid), Clock::at).collect_into_vec(&mut self.timestamps);
+		(0..len).into_par_iter().with_min_len(ASSEMBLE_CHUNK).map_init(|| Walk::new(step), point).unzip_into_vecs(&mut self.kinds, &mut self.values);
+		Some(failure.into_inner()).filter(|&k| k != usize::MAX)
+	}
+}
+
+/// The provenance walk: where grid point `k` falls among the knots. Ascending indices
+/// advance by addition and a forward scan; any other index seeks with a binary search.
+struct Walk<N> {
+	/// The index `offset` and `cursor` describe.
+	next: usize,
+	/// Nanoseconds from the first knot to the last grid point visited.
+	offset: N,
+	/// The grid step in nanoseconds.
+	step: N,
+	/// The first knot at or after `offset`.
+	cursor: usize,
+}
+
+impl<N: Nanos> Walk<N> {
+	const fn new(step: N) -> Self {
+		Self { next: usize::MAX, offset: step, step, cursor: 0 }
+	}
+
+	/// Point `k`'s provenance and value, from its normalised kernel result `y`; `None` if the
+	/// value isn't finite in the caller's units. `offsets` are the knots' offsets from the
+	/// first knot, so `offsets[0]` is zero.
+	fn point<V: Value>(&mut self, offsets: &[N], knots: &Knots<'_, V>, grid: &Grid, method: &Method, k: usize, y: f64) -> (PointKind, Option<V>) {
+		if k == self.next {
+			self.offset = self.offset + self.step;
+		} else {
+			self.offset = N::saturating_from(grid.offset_nanos(knots.t0, k));
+			self.cursor = offsets.partition_point(|&o| o < self.offset);
+		}
+		self.next = k.saturating_add(1);
+		let offset = self.offset;
+		while self.cursor < offsets.len() && offsets[self.cursor] < offset {
+			self.cursor += 1;
+		}
+		let c = self.cursor;
+		if c < offsets.len() && offsets[c] == offset {
+			return (PointKind::Raw, Some(knots.originals[c].clone()));
+		}
+		let last = offsets.len() - 1;
+		let before = offset < offsets[0];
+		if before || offset > offsets[last] {
+			// `Cubic` holds the edge values: return them exactly, not their round trip
+			// through the normalised kernel.
+			let value = match (method.hold, before) {
+				(true, true) => Some(knots.originals[0].clone()),
+				(true, false) => Some(knots.originals[last].clone()),
+				(false, _) => denormalise(knots, y),
+			};
+			return (PointKind::Extrapolated, value);
+		}
+		(PointKind::Interpolated, denormalise(knots, y))
+	}
 }
 
 /// A normalised kernel result back in the caller's units, if it is finite there.

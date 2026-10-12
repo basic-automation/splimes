@@ -1,7 +1,7 @@
 //! Running the kernel: upload the knots, dispatch the grid in chunks, read back.
 
 use std::{
-	collections::VecDeque, sync::{PoisonError, mpsc}, time::Duration
+	collections::VecDeque, sync::{PoisonError, atomic::Ordering, mpsc}, time::Duration
 };
 
 use rayon::prelude::*;
@@ -183,8 +183,20 @@ fn read_back(ctx: &Context, (slot, first, len, submission): (Slot, usize, usize,
 	slice.map_async(MapMode::Read, move |r| {
 		let _ = tx.send(r);
 	});
+	#[cfg(test)]
+	match tests::LOSE_BEFORE_POLL.get() {
+		Some(tests::Loss::Destroyed) => ctx.device.destroy(),
+		Some(tests::Loss::Signalled) => ctx.lost.store(true, Ordering::Release),
+		None => {}
+	}
 	ctx.device.poll(PollType::Wait { submission_index: Some(submission), timeout: Some(CHUNK_TIMEOUT) }).map_err(|e| Error::Gpu(format!("waiting for the GPU: {e}")))?;
 	rx.recv().map_err(|_| Error::Gpu("buffer mapping was abandoned".to_owned()))?.map_err(|e| Error::Gpu(format!("mapping the result buffer: {e}")))?;
+	// wgpu 30 can report a mapping as successful although the device was lost before it
+	// was processed (gfx-rs/wgpu#10301), and the buffer then holds whatever it held before:
+	// for a pooled buffer, an earlier call's results. Never return those as this call's.
+	if ctx.lost.load(Ordering::Acquire) {
+		return Err(Error::GpuUnavailable("the GPU device was lost during the call".to_owned()));
+	}
 	{
 		let view = slice.get_mapped_range().map_err(|e| Error::Gpu(format!("reading the result buffer: {e}")))?;
 		let dest = &mut out[first..first + len];
@@ -282,12 +294,58 @@ fn release(ctx: &Context, slots: Vec<Slot>) {
 pub mod tests {
 	use std::cell::Cell;
 
-	use super::{captured, times};
-	use crate::Error;
+	use chrono::{DateTime, Utc};
+
+	use super::{captured, eval, times};
+	use crate::{Error, Precision, Resolution, Spline, kernel::Method, prepare::Knots, time::Grid};
 
 	thread_local! {
 		/// Makes this thread's next GPU calls fail, to test the fallback paths.
 		pub static FAIL: Cell<bool> = const { Cell::new(false) };
+		/// Loses the device after this thread's next chunk is submitted, before it is read
+		/// back.
+		pub static LOSE_BEFORE_POLL: Cell<Option<Loss>> = const { Cell::new(None) };
+	}
+
+	#[derive(Debug, Clone, Copy)]
+	pub enum Loss {
+		/// `Device::destroy`, which also destroys every buffer, so wgpu fails the read-back.
+		Destroyed,
+		/// The device-lost callback fires, as on a driver reset, with the buffers intact.
+		Signalled,
+	}
+
+	/// A device lost while a chunk is in flight makes the call an error, never the staging
+	/// buffer's previous contents, which wgpu 30 can hand back as a successful mapping
+	/// (gfx-rs/wgpu#10301), and every later call fails fast.
+	#[test]
+	fn a_device_lost_mid_call_is_an_error() {
+		for loss in [Loss::Destroyed, Loss::Signalled] {
+			// A device of its own: losing it must not disturb the shared one.
+			let Ok(ctx) = super::super::context::open() else {
+				eprintln!("a_device_lost_mid_call_is_an_error: skipped, no GPU");
+				return;
+			};
+			let at = |s: i64| DateTime::<Utc>::from_timestamp(s, 0).expect("valid");
+			let run = |values: &[f64]| -> crate::Result<Vec<f64>> {
+				let ts: Vec<_> = (0..).step_by(10).take(values.len()).map(at).collect();
+				let knots = Knots::new(values.len(), |i| ts[i], |i| &values[i], false)?;
+				let grid = Grid::new(at(0), ts[ts.len() - 1], Resolution::Seconds)?;
+				let mut out = vec![0.0; grid.len];
+				eval(&ctx, &knots, &grid, &Method::new(Spline::Linear, &knots), Precision::F32, &mut out).map(|()| out)
+			};
+			let rising: Vec<f64> = (0..100).map(f64::from).collect();
+			let falling: Vec<f64> = rising.iter().rev().copied().collect();
+			// The first call leaves its results in a pooled staging buffer, which the second,
+			// the same size, reuses.
+			let first = run(&rising).expect("the device works");
+			assert!(first[0] < first[first.len() - 1], "normalised, but rising");
+			LOSE_BEFORE_POLL.set(Some(loss));
+			let second = run(&falling);
+			LOSE_BEFORE_POLL.set(None);
+			assert!(matches!(second, Err(Error::GpuUnavailable(_) | Error::Gpu(_))), "{loss:?}: a lost device returned values; the first call's: {:?}", second.map(|v| v == first));
+			assert!(matches!(run(&rising), Err(Error::GpuUnavailable(_))), "{loss:?}: later calls fail fast");
+		}
 	}
 
 	#[test]
