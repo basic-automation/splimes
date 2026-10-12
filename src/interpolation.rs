@@ -559,6 +559,12 @@ mod tests {
 	#[cfg(feature = "gpu")]
 	#[test]
 	fn auto_falls_back_to_the_cpu_when_the_gpu_fails() {
+		// The injected failure needs an open device to get past; without one the call
+		// fails earlier, with `GpuUnavailable`.
+		if crate::prewarm_gpu().is_err() {
+			eprintln!("auto_falls_back_to_the_cpu_when_the_gpu_fails: skipped, no GPU");
+			return;
+		}
 		let points = [Point::new(at(0), BigDecimal::from(0)), Point::new(at(3), BigDecimal::from(9)), Point::new(at(7), BigDecimal::from(1)), Point::new(at(10), BigDecimal::from(10))];
 		let parallel = Interpolator::new(Spline::Cubic, Resolution::Seconds).backend(Backend::Parallel).run(&points, at(-2), at(12)).expect("runs");
 		for precision in [Precision::F64, Precision::F32] {
