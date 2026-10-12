@@ -142,6 +142,22 @@ fn extrapolation_semantics() {
 	assert_eq!(value(Spline::Polynomial(2, Some(0.5)), -5), 13.5, "the parabola t² is 25 at -5 too");
 }
 
+/// A grid whose length fits in `usize` but whose columns can't be allocated (a thousand
+/// years of microseconds: 3.2 × 10¹⁶ points, 250 PB of `f64`s, beyond any 64-bit address
+/// space) is `OutputTooLarge` with its exact length on every backend, not an abort. The
+/// nanosecond grid in `errors` is refused earlier, for not fitting in `usize` at all.
+#[test]
+fn a_grid_too_large_to_allocate_is_refused() {
+	let two = points(&[(0, "0"), (1, "1")]);
+	let (start, end) = (at(0), at(0) + TimeDelta::days(365 * 1000));
+	let points = 365_000 * 86_400 * 1_000_000 + 1;
+	for backend in [Backend::Cpu, Backend::Parallel, Backend::Auto, Backend::Gpu] {
+		let interpolator = Interpolator::new(Spline::Cubic, Resolution::Microseconds).backend(backend);
+		assert_eq!(interpolator.run(&two, start, end), Err(Error::OutputTooLarge { points }), "{backend}");
+		assert_eq!(interpolator.run_f64(&[at(0), at(1)], &[0.0, 1.0], start, end), Err(Error::OutputTooLarge { points }), "{backend}");
+	}
+}
+
 #[test]
 fn errors() {
 	let two = points(&[(0, "0"), (1, "1")]);
