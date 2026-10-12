@@ -10,6 +10,14 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+### Added
+
+- `examples/gpu.rs`: the GPU backend end to end. It configures and starts the GPU, runs
+  a cubic resample of 864,001 points on it in `f64` and `f32`, and compares the results
+  with the CPU. It reports what actually ran (precision, points recomputed in `f64`, and
+  `Backend::Auto`'s choice and any fallback) and the buffer pool's counters.
+  `cargo run --release --example gpu`.
+
 ## [1.1.0] - 2026-10-08
 
 ### Added
