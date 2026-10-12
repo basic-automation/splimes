@@ -112,3 +112,64 @@ fn adversarial_input_never_panics_and_keeps_the_promises() {
 	println!("{ok} series computed, {refused} refused, on {} backend(s)", runs.len());
 	assert!(ok > 500 && refused > 500, "both outcomes are exercised: {ok} / {refused}");
 }
+
+/// Decimals in unusual forms — zero with huge exponents, values that round to zero or to
+/// a subnormal, the edge of `f64`'s range, more digits than `f64` holds, trailing zeros —
+/// go through `run` exactly as their nearest `f64`s go through `run_f64`, on every
+/// backend; raw points return the caller's own decimal, digits and scale; and decimals
+/// beyond `f64`'s range are refused, naming their instant.
+#[test]
+fn unusual_decimals_are_their_nearest_f64() {
+	use std::str::FromStr;
+
+	use bigdecimal::BigDecimal;
+	use splimes::Point;
+
+	const FORMS: [&str; 16] = ["0e400", "-0e-500", "0.000e400", "1e-400", "-2.4e-324", "4.9e-324", "2.2250738585072014e-308", "1.7976931348623157e308", "-1.7976931348623157e308", "123456789012345678901234567890.12345678901234567890", "1.00000000000000000000000000000001", "100.000", "-7E+2", "3.14159265358979323846264338327950288", "1e300", "-0.5"];
+	const BEYOND: [&str; 3] = ["1.8e308", "-1e309", "1e400"];
+	let gpu = common::gpu_or_skip("unusual_decimals_are_their_nearest_f64 (GPU part)");
+	let mut runs = vec![(Backend::Cpu, Precision::F64), (Backend::Parallel, Precision::F64)];
+	if let Some(info) = &gpu {
+		if info.supports_f64 {
+			runs.push((Backend::Gpu, Precision::F64));
+		}
+		runs.push((Backend::Gpu, Precision::F32));
+	}
+	let at = |s: i64| common::epoch() + TimeDelta::seconds(s);
+	let mut r = Rng::new(0xDEC1_3A15);
+	for case in 0..300 {
+		let n = 1 + usize::try_from(r.below(6)).expect("small");
+		let texts: Vec<&str> = (0..n).map(|_| FORMS[usize::try_from(r.below(16)).expect("small")]).collect();
+		let decimals: Vec<BigDecimal> = texts.iter().map(|t| BigDecimal::from_str(t).expect("parses")).collect();
+		let timestamps: Vec<_> = (0..n).map(|i| at(i64::try_from(i).expect("small") * 10)).collect();
+		let nearest: Vec<f64> = texts.iter().map(|t| t.parse::<f64>().expect("parses")).collect();
+		let points: Vec<Point> = timestamps.iter().zip(&decimals).map(|(&t, d)| Point::new(t, d.clone())).collect();
+		let spline = [Spline::Linear, Spline::Cubic, Spline::Polynomial(3, Some(0.5))][usize::try_from(r.below(3)).expect("small")];
+		for &(backend, precision) in &runs {
+			let make = Interpolator::new(spline, Resolution::Seconds).backend(backend).gpu_precision(precision);
+			let (decimal, float) = (make.run(&points, at(-5), at(10 * i64::try_from(n).expect("small") + 5)), make.run_f64(&timestamps, &nearest, at(-5), at(10 * i64::try_from(n).expect("small") + 5)));
+			let context = format!("case {case}, {spline}, {backend} {precision}, {texts:?}");
+			match (&decimal, &float) {
+				(Ok(d), Ok(f)) => {
+					assert_eq!(d.kinds(), f.kinds(), "{context}");
+					for (i, ((dv, &fv), kind)) in d.values().iter().zip(f.values()).zip(d.kinds()).enumerate() {
+						if *kind == PointKind::Raw {
+							let input = timestamps.iter().position(|&t| t == d.timestamps()[i]).expect("raw");
+							assert_eq!(dv.as_bigint_and_exponent(), decimals[input].as_bigint_and_exponent(), "{context}: raw point {i}");
+						} else {
+							assert_eq!(dv.to_string().parse::<f64>().expect("parses"), fv, "{context}: point {i}");
+						}
+					}
+				}
+				_ => assert_eq!(decimal.as_ref().err(), float.as_ref().err(), "{context}"),
+			}
+		}
+	}
+	for beyond in BEYOND {
+		let points = [Point::new(at(0), BigDecimal::from(1)), Point::new(at(10), BigDecimal::from_str(beyond).expect("parses"))];
+		for &(backend, precision) in &runs {
+			let result = Interpolator::new(Spline::Linear, Resolution::Seconds).backend(backend).gpu_precision(precision).run(&points, at(0), at(10));
+			assert_eq!(result.map(|r| r.len()), Err(Error::ValueOutOfRange { timestamp: at(10) }), "{beyond} on {backend} {precision}");
+		}
+	}
+}
