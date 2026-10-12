@@ -133,7 +133,7 @@ from 6.98 to 5.52 ms. Two smaller cases moved within their noise: the 64 Ki-poin
 `BigDecimal` call (3.77 → 4.00 ms, its `f64` twin ±11%) and the 60-point `Auto` call
 (10.4 → 10.6 µs).
 
-### Output assembly in one pass (unreleased)
+### Output assembly in one pass (1.2.0)
 
 Output assembly used to fill all three output columns with placeholders and then
 overwrite them. It now writes each column once, straight into its allocation, with

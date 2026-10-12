@@ -10,6 +10,8 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-12
+
 ### Added
 
 - `examples/gpu.rs`: the GPU backend end to end. It configures and starts the GPU, runs
@@ -34,7 +36,7 @@ supported Rust version is a minor-version change.
   filled with placeholders and overwritten, and the provenance walk compares offsets in
   `i64` whenever the kernel does. `Parallel` calls of 64 Ki grid points and more take
   10–25% less time (16 Mi points: 70.8 → 53.5 ms); `Cpu` is unchanged
-  ([BENCHMARKS.md](BENCHMARKS.md#output-assembly-in-one-pass-unreleased)). Results are
+  ([BENCHMARKS.md](BENCHMARKS.md#output-assembly-in-one-pass-120)). Results are
   unchanged.
 - The `gpu` feature's `pollster` dependency is now 1.x (was 0.4). splimes only uses
   `pollster::block_on`, which 1.0 didn't change; nothing in splimes' API depends on it.
@@ -258,7 +260,8 @@ that history.
 
 - `Point::random` is now test-only, and `fake` is no longer a runtime dependency.
 
-[Unreleased]: https://github.com/basic-automation/splimes/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/basic-automation/splimes/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/basic-automation/splimes/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/basic-automation/splimes/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/basic-automation/splimes/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/basic-automation/splimes/releases/tag/v0.1.0
