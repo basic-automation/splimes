@@ -69,7 +69,7 @@ impl TickUnit {
 
 	/// `tick` as an instant.
 	fn instant(self, tick: i64) -> Result<DateTime<Utc>> {
-		from_posix_nanos(self.nanos(tick)).ok_or(Error::TickOutOfRange { tick, nanos_per_tick: self.nanos_per_tick() })
+		from_posix_nanos(self.nanos(tick)).ok_or_else(|| Error::TickOutOfRange { tick, nanos_per_tick: self.nanos_per_tick() })
 	}
 
 	/// The grid from tick `start` to tick `end`.

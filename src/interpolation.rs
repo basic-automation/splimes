@@ -318,7 +318,7 @@ impl Interpolator {
 }
 
 /// A validated request, ready to compute.
-pub(crate) struct Prepared<'a, V> {
+pub struct Prepared<'a, V> {
 	pub grid: Grid,
 	pub knots: Knots<'a, V>,
 	/// The method actually used.
@@ -335,7 +335,7 @@ struct Run {
 }
 
 /// Grid points per rayon task when assembling output.
-pub(crate) const ASSEMBLE_CHUNK: usize = 16 * 1024;
+pub const ASSEMBLE_CHUNK: usize = 16 * 1024;
 
 /// A `len`-element vector of `value`, or [`Error::OutputTooLarge`] if it can't be
 /// allocated. With `parallel`, rayon fills large ones, so first-touch page faults — most
@@ -423,7 +423,7 @@ impl<V: Value> Columns<V> {
 
 /// The provenance walk: where grid point `k` falls among the knots. Ascending indices
 /// advance by addition and a forward scan; any other index seeks with a binary search.
-pub(crate) struct Walk<N> {
+pub struct Walk<N> {
 	/// The index `offset` and `cursor` describe.
 	next: usize,
 	/// Nanoseconds from the first knot to the last grid point visited.

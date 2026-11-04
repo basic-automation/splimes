@@ -13,8 +13,9 @@ use crate::{
 	Backend, Error, Interpolator, PointKind, Precision, Result, Spline, TickUnit, gpu::ChunkSink, interpolation::{ASSEMBLE_CHUNK, Prepared, Walk}, kernel::{self, Method, Nanos}, prepare::Knots, time::{Clock, Grid}, value::Value
 };
 
-/// One chunk of a streamed interpolation: grid points `first()..first() + len()`, as
-/// parallel columns. `T` is the time representation: `DateTime<Utc>` from
+/// One chunk of a streamed interpolation.
+///
+/// It holds grid points `first()..first() + len()`, as parallel columns. `T` is the time representation: `DateTime<Utc>` from
 /// [`Interpolator::stream_f64`], `i64` epoch ticks from [`Interpolator::stream_epoch`].
 ///
 /// The slices borrow buffers splimes reuses for the next chunk; copy out what you keep.
@@ -179,8 +180,8 @@ impl Interpolator {
 	/// let (ts, vs) = ([at(0), at(10)], [0.0, 10.0]);
 	/// let mut seen = Vec::new();
 	/// let summary = Interpolator::new(Spline::Linear, Resolution::Seconds).backend(Backend::Cpu).stream_chunk_points(4).stream_f64(&ts, &vs, at(0), at(10), |chunk| {
-	/// 	seen.extend_from_slice(chunk.values());
-	/// 	ControlFlow::Continue(())
+	///     seen.extend_from_slice(chunk.values());
+	///     ControlFlow::Continue(())
 	/// })?;
 	/// assert_eq!((summary.len(), summary.chunks()), (11, 3));
 	/// assert_eq!(seen, (0..=10).map(f64::from).collect::<Vec<_>>());
@@ -221,8 +222,8 @@ impl Interpolator {
 	/// let (ticks, values) = ([1_000, 4_000], [1.0, 4.0]);
 	/// let mut out = Vec::new();
 	/// Interpolator::new(Spline::Linear, Resolution::Seconds).stream_epoch(&ticks, TickUnit::MILLISECONDS, &values, 0, 5_000, |chunk| {
-	/// 	out.extend(chunk.iter().map(|(t, v, _)| (t, v)));
-	/// 	ControlFlow::Continue(())
+	///     out.extend(chunk.iter().map(|(t, v, _)| (t, v)));
+	///     ControlFlow::Continue(())
 	/// })?;
 	/// assert_eq!(out, [(0, 0.0), (1_000, 1.0), (2_000, 2.0), (3_000, 3.0), (4_000, 4.0), (5_000, 5.0)]);
 	/// # Ok::<(), splimes::Error>(())
@@ -259,13 +260,14 @@ impl Interpolator {
 		let chunk = self.stream_chunk().min(grid.len);
 		let mut normalised = Vec::new();
 		normalised.try_reserve_exact(chunk).map_err(|_| Error::OutputTooLarge { points: chunk as u128 })?;
-		let mut emitter = Emitter { knots: &knots, grid: &grid, method: &method, times, narrow: kernel::narrow_offsets(&knots, &grid), parallel: self.backend_choice() != Backend::Cpu, repair: None, normalised, out_times: Vec::new(), kinds: Vec::new(), values: Vec::new(), sink, delivered: 0, chunks: 0, recomputed: 0, failure: None, panic: None };
+		let mut emitter = Emitter { knots: &knots, grid: &grid, method: &method, times, narrow: kernel::narrow_offsets(&knots, &grid), parallel: self.backend_choice() != Backend::Cpu, repair: false, unsafe_windows: None, normalised, out_times: Vec::new(), kinds: Vec::new(), values: Vec::new(), sink, delivered: 0, chunks: 0, recomputed: 0, failure: None, panic: None };
 
 		let precision = self.precision_choice();
 		let gpu = |emitter: &mut Emitter<'_, '_, TT, _>| {
-			emitter.repair = Some(if precision == Precision::F32 { kernel::f32_unsafe_windows(&knots, &method) } else { None });
+			emitter.repair = true;
+			emitter.unsafe_windows = if precision == Precision::F32 { kernel::f32_unsafe_windows(&knots, &method) } else { None };
 			let result = crate::gpu::eval_chunks(&knots, &grid, &method, precision, chunk, emitter);
-			emitter.repair = None;
+			(emitter.repair, emitter.unsafe_windows) = (false, None);
 			result
 		};
 		let (backend, precision, gpu_fallback) = match self.backend_choice() {
@@ -304,7 +306,7 @@ impl Interpolator {
 }
 
 /// How a stream writes grid times.
-pub(crate) trait Times: Sync {
+pub trait Times: Sync {
 	type T: Copy + Send;
 
 	/// Grid points `first..first + len` into `out`, replacing its contents.
@@ -312,7 +314,7 @@ pub(crate) trait Times: Sync {
 }
 
 /// Grid times as `DateTime`s, exactly as [`Interpolation::timestamps`](crate::Interpolation::timestamps).
-pub(crate) struct DateTimes;
+pub struct DateTimes;
 
 impl Times for DateTimes {
 	type T = DateTime<Utc>;
@@ -329,7 +331,7 @@ impl Times for DateTimes {
 }
 
 /// Grid times as epoch ticks: point `k` is `first + k × step`.
-pub(crate) struct Ticks {
+pub struct Ticks {
 	first: i64,
 	step: i64,
 }
@@ -358,8 +360,10 @@ struct Emitter<'s, 'k, TT: Times, F> {
 	/// The knots' offsets as `i64`, when the kernel's fast path applies.
 	narrow: Option<&'s [i64]>,
 	parallel: bool,
-	/// For chunks from the GPU: what to recompute in `f64` (see `kernel::repair`).
-	repair: Option<Option<Vec<bool>>>,
+	/// Whether chunks come from the GPU, so need `kernel::repair`.
+	repair: bool,
+	/// For GPU chunks: the windows to recompute in `f64` (see `kernel::repair`).
+	unsafe_windows: Option<Vec<bool>>,
 	normalised: Vec<f64>,
 	out_times: Vec<TT::T>,
 	kinds: Vec<PointKind>,
@@ -441,8 +445,8 @@ impl<TT: Times, F: FnMut(Chunk<'_, TT::T>) -> ControlFlow<()>> Emitter<'_, '_, T
 	/// [`dest`](ChunkSink::dest) returned.
 	fn emit(&mut self, first: usize, len: usize) -> ControlFlow<()> {
 		let (knots, grid, method) = (self.knots, self.grid, self.method);
-		if let Some(unsafe_windows) = &self.repair {
-			let recomputed = kernel::repair(knots, grid, method, first, &mut self.normalised[..len], unsafe_windows.as_deref());
+		if self.repair {
+			let recomputed = kernel::repair(knots, grid, method, first, &mut self.normalised[..len], self.unsafe_windows.as_deref());
 			if recomputed > 0 {
 				log::debug!("splimes: recomputed {recomputed} point(s) in f64 on the CPU that the GPU couldn't compute reliably");
 			}
@@ -486,7 +490,7 @@ impl<TT: Times, F: FnMut(Chunk<'_, TT::T>) -> ControlFlow<()>> ChunkSink for Emi
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpu"))]
 mod tests {
 	use chrono::TimeDelta;
 
@@ -496,7 +500,6 @@ mod tests {
 	/// Under `Auto`, a GPU failure part-way through continues on the CPU from the first
 	/// chunk not yet delivered: every point is delivered once, in order, and the report
 	/// says what happened. An explicit `Gpu` request reports the failure instead.
-	#[cfg(feature = "gpu")]
 	#[test]
 	fn auto_continues_on_the_cpu_after_a_gpu_failure() {
 		if crate::prewarm_gpu().is_err() {

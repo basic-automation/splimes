@@ -159,7 +159,7 @@ pub trait ChunkSink {
 
 /// Runs the kernel on the GPU in chunks of at most `max_chunk` grid points (and at most
 /// the configured [`GpuConfig::chunk_points`]), handing each to `sink` as it is read back.
-#[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
+#[cfg_attr(not(feature = "gpu"), allow(unused_variables, clippy::needless_pass_by_ref_mut))]
 pub fn eval_chunks<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, max_chunk: usize, sink: &mut dyn ChunkSink) -> Result<()> {
 	#[cfg(feature = "gpu")]
 	return run::eval_chunks(context::get()?, knots, grid, method, precision, max_chunk, sink);
