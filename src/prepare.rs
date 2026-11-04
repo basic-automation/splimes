@@ -77,7 +77,7 @@ impl<'a, V: Value> Knots<'a, V> {
 
 	/// Detached knots with the caller's values for each knot, in knot order, again.
 	#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
-	pub fn attach<'b>(self, originals: Vec<&'b V>) -> Knots<'b, V> {
+	pub fn attach(self, originals: Vec<&V>) -> Knots<'_, V> {
 		let Self { t0, h, y, offsets, offsets64, originals: _, centre, scale, min, max } = self;
 		Knots { t0, h, y, offsets, offsets64, originals, centre, scale, min, max }
 	}

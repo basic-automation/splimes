@@ -136,7 +136,7 @@ fn main() {
 	// The modes must agree bit for bit.
 	let (ts, vs, start, end) = &inputs[0];
 	let reference = interpolator.run_f64(ts, vs, *start, *end).expect("runs");
-	assert_eq!(interpolator.spawn_f64(ts.clone(), vs.clone(), *start, *end).wait_blocking(), reference, "spawn differs from run");
+	assert_eq!(block_on(interpolator.spawn_f64(ts.clone(), vs.clone(), *start, *end)).expect("runs"), reference, "spawn differs from run");
 	assert_eq!(interpolator.submit_f64(ts.clone(), vs.clone(), *start, *end).wait().expect("runs"), reference, "submit differs from run");
 
 	println!("mode,requests,wall_ms,requests_per_s,caller_calling_ms,caller_waiting_ms,threads_blocked_per_in_flight_request,points,checksum");
@@ -156,7 +156,7 @@ fn main() {
 				}
 			}
 			"spawn" => {
-				let mut queue = VecDeque::new();
+				let mut queue: VecDeque<splimes::InterpolationFuture<f64>> = VecDeque::new();
 				for r in 0..a.requests {
 					sink ^= parse(a.parse_us, r);
 					if queue.len() >= a.depth {
@@ -209,16 +209,5 @@ fn main() {
 			_ => "0 (one shared poller)",
 		};
 		println!("{mode},{},{:.1},{:.1},{:.1},{:.1},{blocked},{},{:.6e}", a.requests, t.wall.as_secs_f64() * 1e3, a.requests as f64 / t.wall.as_secs_f64(), t.calling.as_secs_f64() * 1e3, t.waiting.as_secs_f64() * 1e3, t.points, t.checksum);
-	}
-}
-
-/// Awaits a spawned future on this thread.
-trait WaitBlocking {
-	fn wait_blocking(self) -> Interpolation<f64>;
-}
-
-impl WaitBlocking for splimes::InterpolationFuture<f64> {
-	fn wait_blocking(self) -> Interpolation<f64> {
-		block_on(self).expect("runs")
 	}
 }

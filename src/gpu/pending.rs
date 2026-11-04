@@ -180,10 +180,7 @@ impl Job {
 		let mut state = lock(&self.state);
 		let cancelled = state.cancelled;
 		let Some(active) = state.active.as_mut() else { return (false, true) };
-		let result = match polled {
-			Some(e) => Err(e.clone()),
-			None => active.advance(self.ctx, cancelled),
-		};
+		let result = polled.map_or_else(|| active.advance(self.ctx, cancelled), |e| Err(e.clone()));
 		let verdict = match result {
 			Ok((progressed, false)) => return (progressed, false),
 			Ok((_, true)) => Ok(()),
@@ -242,7 +239,9 @@ impl Job {
 		let mut state = lock(&self.state);
 		state.cancelled = true;
 		state.waker = None;
-		if !on_poller() {
+		if on_poller() {
+			drop(state);
+		} else {
 			drop(self.changed.wait_while(state, |s| matches!(s.outcome, Outcome::Running)).unwrap_or_else(PoisonError::into_inner));
 		}
 	}
@@ -328,7 +327,7 @@ fn drive(pump: &Pump) {
 #[cfg(test)]
 mod tests {
 	use std::{
-		sync::Arc, task::{Wake, Waker}, thread, time::{Duration, Instant}
+		task::Waker, thread, time::{Duration, Instant}
 	};
 
 	use chrono::{DateTime, Utc};
@@ -339,11 +338,6 @@ mod tests {
 			context, run::tests::{LOSE_BEFORE_POLL, Loss}
 		}, kernel::Method, prepare::Knots, time::Grid
 	};
-
-	struct Noop;
-	impl Wake for Noop {
-		fn wake(self: Arc<Self>) {}
-	}
 
 	/// A device lost while a job's chunks are in flight makes the job an error, never the
 	/// staging buffers' previous contents, and it never hangs.
@@ -371,9 +365,9 @@ mod tests {
 				Err((e, _)) => panic!("{loss:?}: could not start: {e}"),
 			};
 			let deadline = Instant::now() + Duration::from_secs(30);
-			let waker = Waker::from(Arc::new(Noop));
+			let waker = Waker::noop();
 			let verdict = loop {
-				if let Some((verdict, _)) = job.poll(&waker) {
+				if let Some((verdict, _)) = job.poll(waker) {
 					break verdict;
 				}
 				assert!(Instant::now() < deadline, "{loss:?}: the job never finished");

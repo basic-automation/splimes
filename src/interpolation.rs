@@ -299,7 +299,7 @@ fn cpu<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, backend: Ba
 }
 
 /// How a computation actually ran.
-pub(crate) struct Run {
+pub struct Run {
 	backend: Backend,
 	precision: Precision,
 	gpu_fallback: Option<Error>,

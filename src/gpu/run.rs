@@ -242,11 +242,11 @@ fn read_back(ctx: &Context, (slot, first, len, submission): (Slot, usize, usize,
 /// Copies a chunk's results from `slot`'s mapped staging buffer into `dest`, then unmaps
 /// it. With `parallel`, on rayon's pool.
 pub fn copy_out(slot: &Slot, precision: Precision, dest: &mut [f64], parallel: bool) -> Result<()> {
+	const PART: usize = 64 * 1024;
 	{
 		let slice = slot.staging.slice(..dest.len() as u64 * precision_bytes(precision));
 		let view = slice.get_mapped_range().map_err(|e| Error::Gpu(format!("reading the result buffer: {e}")))?;
 		// Mapped memory may be uncached or write-combined; copy it out once.
-		const PART: usize = 64 * 1024;
 		match (precision, parallel) {
 			(Precision::F64, true) => dest.par_chunks_mut(PART).zip(bytemuck::cast_slice::<u8, f64>(&view).par_chunks(PART)).for_each(|(d, s)| d.copy_from_slice(s)),
 			(Precision::F64, false) => dest.copy_from_slice(bytemuck::cast_slice::<u8, f64>(&view)),

@@ -227,7 +227,8 @@ fn cpu_backends_and_refusals_match_run() {
 		assert_eq!(handle.wait(), interpolator.run_f64(&ts, &vs, start, end));
 	}
 	let gpu = Interpolator::new(Spline::Cubic, Resolution::Seconds).backend(Backend::Gpu);
-	let refusals: Vec<(Interpolator, Vec<DateTime<Utc>>, Vec<f64>, DateTime<Utc>, DateTime<Utc>)> = vec![
+	type Case = (Interpolator, Vec<DateTime<Utc>>, Vec<f64>, DateTime<Utc>, DateTime<Utc>);
+	let refusals: Vec<Case> = vec![
 		(gpu, Vec::new(), Vec::new(), start, end),
 		(gpu, ts.clone(), vs.clone(), end, start),
 		(gpu, ts.clone(), vs[1..].to_vec(), start, end),

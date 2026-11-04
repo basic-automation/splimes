@@ -67,6 +67,7 @@ impl Interpolator {
 	/// polled again after it resolved, and [`Error::Gpu`] if the poller thread can't be
 	/// started.
 	#[must_use = "dropping the handle discards the interpolation"]
+	#[cfg_attr(not(feature = "gpu"), allow(clippy::needless_pass_by_value))] // Owned for the GPU path.
 	pub fn submit(self, points: Vec<Point>, start: DateTime<Utc>, end: DateTime<Utc>) -> GpuHandle<BigDecimal> {
 		#[cfg(feature = "gpu")]
 		if let Some(grid) = self.gpu_grid(start, end) {
@@ -81,6 +82,7 @@ impl Interpolator {
 	///
 	/// As [`submit`](Self::submit), with [`run_f64`](Self::run_f64)'s errors.
 	#[must_use = "dropping the handle discards the interpolation"]
+	#[cfg_attr(not(feature = "gpu"), allow(clippy::needless_pass_by_value))] // Owned for the GPU path.
 	pub fn submit_f64(self, timestamps: Vec<DateTime<Utc>>, values: Vec<f64>, start: DateTime<Utc>, end: DateTime<Utc>) -> GpuHandle<f64> {
 		#[cfg(feature = "gpu")]
 		if timestamps.len() == values.len()
@@ -218,6 +220,7 @@ impl<V> GpuHandle<V> {
 
 	/// Whether the result can be taken without waiting for the GPU. Never blocks.
 	#[must_use]
+	#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
 	pub fn is_finished(&self) -> bool {
 		match &self.state {
 			#[cfg(feature = "gpu")]
@@ -262,13 +265,14 @@ impl<V> Future for GpuHandle<V> {
 		match std::mem::replace(&mut this.state, State::Taken) {
 			State::Ready(result) => Poll::Ready(result),
 			#[cfg(feature = "gpu")]
-			State::Gpu { job, finish } => match job.poll(cx.waker()) {
-				Some((verdict, out)) => Poll::Ready(finish(verdict, out)),
-				None => {
+			State::Gpu { job, finish } => {
+				if let Some((verdict, out)) = job.poll(cx.waker()) {
+					Poll::Ready(finish(verdict, out))
+				} else {
 					this.state = State::Gpu { job, finish };
 					Poll::Pending
 				}
-			},
+			}
 			State::Taken => {
 				let _ = cx;
 				Poll::Ready(Err(taken()))
