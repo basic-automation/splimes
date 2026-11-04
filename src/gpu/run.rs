@@ -12,13 +12,27 @@ use crate::{Error, Precision, Result, kernel::Method, prepare::Knots, time::Grid
 
 const WORKGROUP: u32 = 256;
 /// Dispatches have at most 65,535 workgroups per dimension.
-const MAX_CHUNK: u64 = 65_535 * WORKGROUP as u64;
+pub const MAX_CHUNK: u64 = 65_535 * WORKGROUP as u64;
+/// A time is three u32 words, in either precision.
+pub const TIME_BYTES: u64 = 12;
 /// Chunks in flight at once: one computing while the previous one is read back.
 const IN_FLIGHT: usize = 2;
 /// How long to wait for one chunk before declaring the GPU hung.
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Runs the whole grid on one device.
 pub fn eval<V: Value>(ctx: &Context, knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, out: &mut [f64]) -> Result<()> {
+	let chunk = ctx.chunk_len();
+	let mut chunks = out.chunks_mut(chunk).enumerate();
+	run_chunks(ctx, knots, grid, method, precision, || chunks.next().map(|(i, dest)| (i * chunk, dest)))
+}
+
+/// Runs, on one device, every chunk `next` hands out until it hands out none: `(first grid
+/// point, its results)`, each at most [`Context::chunk_len`] points.
+pub fn run_chunks<'o, V: Value>(ctx: &Context, knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, next: impl FnMut() -> Option<(usize, &'o mut [f64])>) -> Result<()> {
+	ctx.calls.fetch_add(1, Ordering::Relaxed);
+	ctx.in_flight.fetch_add(1, Ordering::AcqRel);
+	let _busy = InFlight(ctx);
 	#[cfg(test)]
 	if tests::FAIL.get() {
 		return Err(Error::Gpu("injected failure".to_owned()));
@@ -26,9 +40,18 @@ pub fn eval<V: Value>(ctx: &Context, knots: &Knots<'_, V>, grid: &Grid, method: 
 	let kernel = ctx.kernel(precision)?;
 	// Buffer sets go back to the pool only if the device reported no error for this call:
 	// a set with a buffer that failed to allocate would otherwise fail every later call.
-	let finished = captured(&ctx.device, || dispatch(ctx, kernel, knots, grid, method, precision, out))?;
+	let finished = captured(&ctx.device, || dispatch(ctx, kernel, knots, grid, method, precision, next))?;
 	release(ctx, finished);
 	Ok(())
+}
+
+/// Counts a call in flight on a device until dropped, however the call ends.
+struct InFlight<'a>(&'a Context);
+
+impl Drop for InFlight<'_> {
+	fn drop(&mut self) {
+		self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
+	}
 }
 
 /// Runs `f` inside error scopes for every error class and returns the first error the
@@ -66,10 +89,9 @@ fn times(offsets: impl Iterator<Item = i128>, out: &mut Vec<u8>) {
 /// bytes.
 const STAGE_BLOCK: usize = 12 * 16 * 1024;
 
-fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, out: &mut [f64]) -> Result<Vec<Slot>> {
+fn dispatch<'o, V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, mut next: impl FnMut() -> Option<(usize, &'o mut [f64])>) -> Result<Vec<Slot>> {
 	let elem = precision_bytes(precision);
-	// A time is three u32 words, in either precision.
-	let time_bytes: u64 = 12;
+	let time_bytes = TIME_BYTES;
 	let pair_len: usize = 12;
 	let n = knots.len();
 	if n as u64 * time_bytes > ctx.max_binding_bytes {
@@ -87,21 +109,22 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 	let knot_u = upload(ctx, "splimes knot times", &knot_u);
 	let knot_y = upload(ctx, "splimes knot values", &knot_y);
 
-	#[allow(clippy::cast_possible_truncation)] // Bounded by MAX_CHUNK.
-	let chunk = u64::from(ctx.config.chunk_points.max(1)).min(MAX_CHUNK).min(ctx.max_binding_bytes / time_bytes) as usize;
 	// Times are nanoseconds in both kernels, scaled by 1/h.
 	let inv_h = 1.0 / knots.h;
 	let (lo, hi) = method.bounds.unwrap_or((0.0, 0.0));
 	#[allow(clippy::cast_possible_truncation)] // `len <= MAX_CHUNK`, which fits u32.
 	let header = |len: usize| [n_u32, method.window as u32, u32::from(method.hold), u32::from(method.bounds.is_some()), len as u32, 0, 0, 0];
 
-	let mut pending: VecDeque<(Slot, usize, usize, wgpu::SubmissionIndex)> = VecDeque::with_capacity(IN_FLIGHT);
+	let mut pending: VecDeque<(Slot, &'o mut [f64], wgpu::SubmissionIndex)> = VecDeque::with_capacity(IN_FLIGHT);
 	// Buffer sets whose chunk has been read back, ready for the next chunk: a call holds at
 	// most `IN_FLIGHT` sets however long its grid.
 	let mut finished: Vec<Slot> = Vec::with_capacity(IN_FLIGHT);
-	let mut first = 0;
-	while first < grid.len {
-		let len = chunk.min(grid.len - first);
+	while let Some((first, dest)) = next() {
+		let len = dest.len();
+		if len == 0 {
+			continue;
+		}
+		ctx.chunks.fetch_add(1, Ordering::Relaxed);
 		let slot = finished.iter().position(|s| s.capacity >= len).map_or_else(|| acquire(ctx, precision, len), |i| finished.swap_remove(i));
 
 		let mut params = bytemuck::cast_slice(&header(len)).to_vec();
@@ -145,16 +168,15 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 		}
 		encoder.copy_buffer_to_buffer(&slot.out, 0, &slot.staging, 0, bytes);
 		let submission = ctx.queue.submit(Some(encoder.finish()));
-		pending.push_back((slot, first, len, submission));
+		pending.push_back((slot, dest, submission));
 		if pending.len() >= IN_FLIGHT
 			&& let Some(job) = pending.pop_front()
 		{
-			finished.push(read_back(ctx, job, precision, out)?);
+			finished.push(read_back(ctx, job, precision)?);
 		}
-		first += len;
 	}
 	while let Some(job) = pending.pop_front() {
-		finished.push(read_back(ctx, job, precision, out)?);
+		finished.push(read_back(ctx, job, precision)?);
 	}
 	Ok(finished)
 }
@@ -176,15 +198,15 @@ const fn sized(binding: u32, buffer: &Buffer, size: u64) -> BindGroupEntry<'_> {
 }
 
 /// Waits for one chunk, copies its results into `out`, and hands back its buffer set.
-fn read_back(ctx: &Context, (slot, first, len, submission): (Slot, usize, usize, wgpu::SubmissionIndex), precision: Precision, out: &mut [f64]) -> Result<Slot> {
-	let bytes = len as u64 * precision_bytes(precision);
+fn read_back(ctx: &Context, (slot, dest, submission): (Slot, &mut [f64], wgpu::SubmissionIndex), precision: Precision) -> Result<Slot> {
+	let bytes = dest.len() as u64 * precision_bytes(precision);
 	let slice = slot.staging.slice(..bytes);
 	let (tx, rx) = mpsc::channel();
 	slice.map_async(MapMode::Read, move |r| {
 		let _ = tx.send(r);
 	});
 	#[cfg(test)]
-	match tests::LOSE_BEFORE_POLL.get() {
+	match tests::LOSE_BEFORE_POLL.take() {
 		Some(tests::Loss::Destroyed) => ctx.device.destroy(),
 		Some(tests::Loss::Signalled) => ctx.lost.store(true, Ordering::Release),
 		None => {}
@@ -199,7 +221,6 @@ fn read_back(ctx: &Context, (slot, first, len, submission): (Slot, usize, usize,
 	}
 	{
 		let view = slice.get_mapped_range().map_err(|e| Error::Gpu(format!("reading the result buffer: {e}")))?;
-		let dest = &mut out[first..first + len];
 		// Mapped memory may be uncached or write-combined; copy it out once, in parallel.
 		match precision {
 			Precision::F64 => dest.par_chunks_mut(64 * 1024).zip(bytemuck::cast_slice::<u8, f64>(&view).par_chunks(64 * 1024)).for_each(|(d, s)| d.copy_from_slice(s)),
@@ -303,7 +324,7 @@ pub mod tests {
 		/// Makes this thread's next GPU calls fail, to test the fallback paths.
 		pub static FAIL: Cell<bool> = const { Cell::new(false) };
 		/// Loses the device after this thread's next chunk is submitted, before it is read
-		/// back.
+		/// back. Once: the next read-back clears it.
 		pub static LOSE_BEFORE_POLL: Cell<Option<Loss>> = const { Cell::new(None) };
 	}
 
@@ -350,10 +371,11 @@ pub mod tests {
 
 	#[test]
 	fn device_errors_become_errors_not_panics() {
-		let Ok(ctx) = super::super::context::get() else {
+		let Ok(devices) = super::super::context::get() else {
 			eprintln!("device_errors_become_errors_not_panics: skipped, no GPU");
 			return;
 		};
+		let ctx = devices.primary();
 		// MAP_READ may only be combined with COPY_DST: a validation error, which wgpu would
 		// otherwise turn into a panic.
 		let result = captured(&ctx.device, || {

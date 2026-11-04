@@ -127,7 +127,12 @@
 //! `vulkan`, `dx12`, `metal` or `gl`), and `WGPU_ADAPTER_NAME` picks the first adapter
 //! whose name contains it, ignoring case. A name that matches no adapter makes the GPU
 //! unavailable, with the adapters found in the error; splimes never falls back to another.
-//! [`gpu_info`] reports the adapter and API in use.
+//! [`gpu_info`] reports the adapter and API in use. [`gpu_adapters`] lists the adapters,
+//! and [`GpuConfig::adapter`] picks one in code.
+//!
+//! [`GpuConfig::devices`] opens several devices ([`GpuDevices`]): calls then go to the
+//! least-loaded one, and a large call's chunks are shared among all of them, each with its
+//! own buffer pool, error handling and device-lost handling. [`gpu_devices`] reports each.
 //!
 //! All entry points are synchronous and CPU- or GPU-bound. From async code, use
 //! [`Interpolator::spawn`], which runs the work on rayon's pool and returns a future any
@@ -163,7 +168,7 @@
 pub use auto::{AutoThresholds, auto_thresholds, set_auto_thresholds};
 pub use calibrate::{Calibration, CalibrationSample, calibrate};
 pub use error::{Error, Result};
-pub use gpu::{GpuConfig, GpuInfo, GpuPoolStats, configure_gpu, gpu_config, gpu_info, gpu_pool_stats, prewarm_gpu, prewarm_gpu_with_config};
+pub use gpu::{AdapterSelector, GpuAdapterInfo, GpuConfig, GpuDeviceStats, GpuDevices, GpuInfo, GpuPoolStats, configure_gpu, gpu_adapters, gpu_config, gpu_devices, gpu_info, gpu_pool_stats, prewarm_gpu, prewarm_gpu_with_config};
 pub use interpolation::{Backend, Interpolation, Interpolator, Precision, interpolate};
 pub use point::{Point, PointKind};
 pub use resolution::Resolution;
