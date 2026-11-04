@@ -14,9 +14,9 @@ const WORKGROUP: u32 = 256;
 /// Dispatches have at most 65,535 workgroups per dimension.
 const MAX_CHUNK: u64 = 65_535 * WORKGROUP as u64;
 /// Chunks in flight at once: one computing while the previous one is read back.
-const IN_FLIGHT: usize = 2;
+pub const IN_FLIGHT: usize = 2;
 /// How long to wait for one chunk before declaring the GPU hung.
-const CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+pub const CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn eval<V: Value>(ctx: &Context, knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, out: &mut [f64]) -> Result<()> {
 	#[cfg(test)]
@@ -67,84 +67,16 @@ fn times(offsets: impl Iterator<Item = i128>, out: &mut Vec<u8>) {
 const STAGE_BLOCK: usize = 12 * 16 * 1024;
 
 fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, out: &mut [f64]) -> Result<Vec<Slot>> {
-	let elem = precision_bytes(precision);
-	// A time is three u32 words, in either precision.
-	let time_bytes: u64 = 12;
-	let pair_len: usize = 12;
-	let n = knots.len();
-	if n as u64 * time_bytes > ctx.max_binding_bytes {
-		return Err(Error::Gpu(format!("{n} knots exceed {}'s storage-binding limit of {} bytes", ctx.info.name, ctx.max_binding_bytes)));
-	}
-	let n_u32 = u32::try_from(n).map_err(|_| Error::Gpu(format!("{n} knots exceed the GPU kernel's u32 indexing")))?;
-
-	let mut knot_u = Vec::with_capacity(n * pair_len);
-	times(knots.offsets.iter().copied(), &mut knot_u);
-	let knot_y: Vec<u8> = match precision {
-		Precision::F64 => bytemuck::cast_slice(&knots.y).to_vec(),
-		#[allow(clippy::cast_possible_truncation)] // Single precision is what was asked for.
-		Precision::F32 => bytemuck::cast_slice(&knots.y.iter().map(|&v| v as f32).collect::<Vec<f32>>()).to_vec(),
-	};
-	let knot_u = upload(ctx, "splimes knot times", &knot_u);
-	let knot_y = upload(ctx, "splimes knot values", &knot_y);
-
-	#[allow(clippy::cast_possible_truncation)] // Bounded by MAX_CHUNK.
-	let chunk = u64::from(ctx.config.chunk_points.max(1)).min(MAX_CHUNK).min(ctx.max_binding_bytes / time_bytes) as usize;
-	// Times are nanoseconds in both kernels, scaled by 1/h.
-	let inv_h = 1.0 / knots.h;
-	let (lo, hi) = method.bounds.unwrap_or((0.0, 0.0));
-	#[allow(clippy::cast_possible_truncation)] // `len <= MAX_CHUNK`, which fits u32.
-	let header = |len: usize| [n_u32, method.window as u32, u32::from(method.hold), u32::from(method.bounds.is_some()), len as u32, 0, 0, 0];
-
+	let stream = Stream::new(ctx, knots, grid, method, precision)?;
 	let mut pending: VecDeque<(Slot, usize, usize, wgpu::SubmissionIndex)> = VecDeque::with_capacity(IN_FLIGHT);
 	// Buffer sets whose chunk has been read back, ready for the next chunk: a call holds at
 	// most `IN_FLIGHT` sets however long its grid.
 	let mut finished: Vec<Slot> = Vec::with_capacity(IN_FLIGHT);
 	let mut first = 0;
 	while first < grid.len {
-		let len = chunk.min(grid.len - first);
+		let len = stream.chunk.min(grid.len - first);
 		let slot = finished.iter().position(|s| s.capacity >= len).map_or_else(|| acquire(ctx, precision, len), |i| finished.swap_remove(i));
-
-		let mut params = bytemuck::cast_slice(&header(len)).to_vec();
-		match precision {
-			Precision::F64 => params.extend_from_slice(bytemuck::cast_slice(&[inv_h, lo, hi, 0.0])),
-			#[allow(clippy::cast_possible_truncation)]
-			Precision::F32 => params.extend_from_slice(bytemuck::cast_slice(&[inv_h as f32, lo as f32, hi as f32, 0.0])),
-		}
-		ctx.queue.write_buffer(&slot.params, 0, &params);
-
-		// Grid times, exact on the host, written in parallel straight into the queue's
-		// staging memory: no intermediate buffer, no serial copy. (Fixed-size blocks, because
-		// wgpu only lets a sized write-only view cross threads.)
-		let size = wgpu::BufferSize::new(len as u64 * time_bytes).ok_or_else(|| Error::Gpu("empty chunk".to_owned()))?;
-		let mut staging = ctx.queue.write_buffer_with(&slot.grid, 0, size).ok_or_else(|| Error::Gpu("could not stage the grid times".to_owned()))?;
-		let (blocks, tail) = staging.slice(..).into_chunks::<STAGE_BLOCK>();
-		let per_block = STAGE_BLOCK / pair_len;
-		let fill = |from: usize, mut part: wgpu::WriteOnly<'_, [u8]>| {
-			let mut bytes = Vec::with_capacity(part.len());
-			times(grid.offsets(knots.t0, from).take(part.len() / pair_len), &mut bytes);
-			part.copy_from_slice(&bytes);
-		};
-		let blocks: Vec<wgpu::WriteOnly<'_, [u8; STAGE_BLOCK]>> = blocks.into_iter().collect();
-		let whole = blocks.len();
-		blocks.into_par_iter().enumerate().for_each(|(c, block)| fill(first + c * per_block, block.into()));
-		if !tail.is_empty() {
-			fill(first + whole * per_block, tail);
-		}
-		drop(staging);
-
-		let bytes = len as u64 * elem;
-		let entries = [BindGroupEntry { binding: 0, resource: knot_u.as_entire_binding() }, BindGroupEntry { binding: 1, resource: knot_y.as_entire_binding() }, sized(2, &slot.out, bytes), BindGroupEntry { binding: 3, resource: slot.params.as_entire_binding() }, sized(4, &slot.grid, len as u64 * time_bytes)];
-		let bind_group = ctx.device.create_bind_group(&BindGroupDescriptor { label: Some("splimes"), layout: &kernel.layout, entries: &entries });
-		let mut encoder = ctx.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("splimes") });
-		{
-			let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor { label: Some("splimes"), timestamp_writes: None });
-			pass.set_pipeline(&kernel.pipeline);
-			pass.set_bind_group(0, &bind_group, &[]);
-			#[allow(clippy::cast_possible_truncation)]
-			pass.dispatch_workgroups((len as u32).div_ceil(WORKGROUP), 1, 1);
-		}
-		encoder.copy_buffer_to_buffer(&slot.out, 0, &slot.staging, 0, bytes);
-		let submission = ctx.queue.submit(Some(encoder.finish()));
+		let submission = stream.submit(ctx, kernel, &slot, first, len, true)?;
 		pending.push_back((slot, first, len, submission));
 		if pending.len() >= IN_FLIGHT
 			&& let Some(job) = pending.pop_front()
@@ -157,6 +89,112 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 		finished.push(read_back(ctx, job, precision, out)?);
 	}
 	Ok(finished)
+}
+
+/// One call's knots on the device, and what each chunk's dispatch needs to know.
+pub struct Stream {
+	knot_u: Buffer,
+	knot_y: Buffer,
+	precision: Precision,
+	/// Grid points per chunk.
+	pub chunk: usize,
+	n: u32,
+	window: u32,
+	hold: bool,
+	bounded: bool,
+	inv_h: f64,
+	lo: f64,
+	hi: f64,
+	grid: Grid,
+	t0: i128,
+}
+
+impl Stream {
+	/// Uploads the knots.
+	pub fn new<V: Value>(ctx: &Context, knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision) -> Result<Self> {
+		// A time is three u32 words, in either precision.
+		let time_bytes: u64 = 12;
+		let pair_len: usize = 12;
+		let n = knots.len();
+		if n as u64 * time_bytes > ctx.max_binding_bytes {
+			return Err(Error::Gpu(format!("{n} knots exceed {}'s storage-binding limit of {} bytes", ctx.info.name, ctx.max_binding_bytes)));
+		}
+		let n_u32 = u32::try_from(n).map_err(|_| Error::Gpu(format!("{n} knots exceed the GPU kernel's u32 indexing")))?;
+
+		let mut knot_u = Vec::with_capacity(n * pair_len);
+		times(knots.offsets.iter().copied(), &mut knot_u);
+		let knot_y: Vec<u8> = match precision {
+			Precision::F64 => bytemuck::cast_slice(&knots.y).to_vec(),
+			#[allow(clippy::cast_possible_truncation)] // Single precision is what was asked for.
+			Precision::F32 => bytemuck::cast_slice(&knots.y.iter().map(|&v| v as f32).collect::<Vec<f32>>()).to_vec(),
+		};
+		let knot_u = upload(ctx, "splimes knot times", &knot_u);
+		let knot_y = upload(ctx, "splimes knot values", &knot_y);
+
+		#[allow(clippy::cast_possible_truncation)] // Bounded by MAX_CHUNK.
+		let chunk = u64::from(ctx.config.chunk_points.max(1)).min(MAX_CHUNK).min(ctx.max_binding_bytes / time_bytes) as usize;
+		let (lo, hi) = method.bounds.unwrap_or((0.0, 0.0));
+		#[allow(clippy::cast_possible_truncation)] // A window is at most MAX_WINDOW knots.
+		let window = method.window as u32;
+		// Times are nanoseconds in both kernels, scaled by 1/h.
+		Ok(Self { knot_u, knot_y, precision, chunk, n: n_u32, window, hold: method.hold, bounded: method.bounds.is_some(), inv_h: 1.0 / knots.h, lo, hi, grid: *grid, t0: knots.t0 })
+	}
+
+	/// Stages, dispatches and submits grid points `first..first + len` into `slot`, and
+	/// queues the copy of their results to its staging buffer. With `parallel`, the grid
+	/// times are written on rayon's pool.
+	pub fn submit(&self, ctx: &Context, kernel: &super::context::Kernel, slot: &Slot, first: usize, len: usize, parallel: bool) -> Result<wgpu::SubmissionIndex> {
+		let time_bytes: u64 = 12;
+		let pair_len: usize = 12;
+		let elem = precision_bytes(self.precision);
+		#[allow(clippy::cast_possible_truncation)] // `len <= MAX_CHUNK`, which fits u32.
+		let header = [self.n, self.window, u32::from(self.hold), u32::from(self.bounded), len as u32, 0, 0, 0];
+		let mut params = bytemuck::cast_slice(&header).to_vec();
+		match self.precision {
+			Precision::F64 => params.extend_from_slice(bytemuck::cast_slice(&[self.inv_h, self.lo, self.hi, 0.0])),
+			#[allow(clippy::cast_possible_truncation)]
+			Precision::F32 => params.extend_from_slice(bytemuck::cast_slice(&[self.inv_h as f32, self.lo as f32, self.hi as f32, 0.0])),
+		}
+		ctx.queue.write_buffer(&slot.params, 0, &params);
+
+		// Grid times, exact on the host, written straight into the queue's staging memory: no
+		// intermediate buffer, no serial copy. (Fixed-size blocks, because wgpu only lets a
+		// sized write-only view cross threads.)
+		let size = wgpu::BufferSize::new(len as u64 * time_bytes).ok_or_else(|| Error::Gpu("empty chunk".to_owned()))?;
+		let mut staging = ctx.queue.write_buffer_with(&slot.grid, 0, size).ok_or_else(|| Error::Gpu("could not stage the grid times".to_owned()))?;
+		let (blocks, tail) = staging.slice(..).into_chunks::<STAGE_BLOCK>();
+		let per_block = STAGE_BLOCK / pair_len;
+		let fill = |from: usize, mut part: wgpu::WriteOnly<'_, [u8]>| {
+			let mut bytes = Vec::with_capacity(part.len());
+			times(self.grid.offsets(self.t0, from).take(part.len() / pair_len), &mut bytes);
+			part.copy_from_slice(&bytes);
+		};
+		let blocks: Vec<wgpu::WriteOnly<'_, [u8; STAGE_BLOCK]>> = blocks.into_iter().collect();
+		let whole = blocks.len();
+		if parallel {
+			blocks.into_par_iter().enumerate().for_each(|(c, block)| fill(first + c * per_block, block.into()));
+		} else {
+			blocks.into_iter().enumerate().for_each(|(c, block)| fill(first + c * per_block, block.into()));
+		}
+		if !tail.is_empty() {
+			fill(first + whole * per_block, tail);
+		}
+		drop(staging);
+
+		let bytes = len as u64 * elem;
+		let entries = [BindGroupEntry { binding: 0, resource: self.knot_u.as_entire_binding() }, BindGroupEntry { binding: 1, resource: self.knot_y.as_entire_binding() }, sized(2, &slot.out, bytes), BindGroupEntry { binding: 3, resource: slot.params.as_entire_binding() }, sized(4, &slot.grid, len as u64 * time_bytes)];
+		let bind_group = ctx.device.create_bind_group(&BindGroupDescriptor { label: Some("splimes"), layout: &kernel.layout, entries: &entries });
+		let mut encoder = ctx.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("splimes") });
+		{
+			let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor { label: Some("splimes"), timestamp_writes: None });
+			pass.set_pipeline(&kernel.pipeline);
+			pass.set_bind_group(0, &bind_group, &[]);
+			#[allow(clippy::cast_possible_truncation)]
+			pass.dispatch_workgroups((len as u32).div_ceil(WORKGROUP), 1, 1);
+		}
+		encoder.copy_buffer_to_buffer(&slot.out, 0, &slot.staging, 0, bytes);
+		Ok(ctx.queue.submit(Some(encoder.finish())))
+	}
 }
 
 /// A storage buffer holding `bytes`, created unmapped and filled through the queue, so an
@@ -197,24 +235,36 @@ fn read_back(ctx: &Context, (slot, first, len, submission): (Slot, usize, usize,
 	if ctx.lost.load(Ordering::Acquire) {
 		return Err(Error::GpuUnavailable("the GPU device was lost during the call".to_owned()));
 	}
-	{
-		let view = slice.get_mapped_range().map_err(|e| Error::Gpu(format!("reading the result buffer: {e}")))?;
-		let dest = &mut out[first..first + len];
-		// Mapped memory may be uncached or write-combined; copy it out once, in parallel.
-		match precision {
-			Precision::F64 => dest.par_chunks_mut(64 * 1024).zip(bytemuck::cast_slice::<u8, f64>(&view).par_chunks(64 * 1024)).for_each(|(d, s)| d.copy_from_slice(s)),
-			Precision::F32 => dest.par_chunks_mut(64 * 1024).zip(bytemuck::cast_slice::<u8, f32>(&view).par_chunks(64 * 1024)).for_each(|(d, s)| {
-				for (d, &s) in d.iter_mut().zip(s) {
-					*d = f64::from(s);
-				}
-			}),
-		}
-	}
-	slot.staging.unmap();
+	copy_out(&slot, precision, &mut out[first..first + len], true)?;
 	Ok(slot)
 }
 
-const fn precision_bytes(precision: Precision) -> u64 {
+/// Copies a chunk's results from `slot`'s mapped staging buffer into `dest`, then unmaps
+/// it. With `parallel`, on rayon's pool.
+pub fn copy_out(slot: &Slot, precision: Precision, dest: &mut [f64], parallel: bool) -> Result<()> {
+	{
+		let slice = slot.staging.slice(..dest.len() as u64 * precision_bytes(precision));
+		let view = slice.get_mapped_range().map_err(|e| Error::Gpu(format!("reading the result buffer: {e}")))?;
+		// Mapped memory may be uncached or write-combined; copy it out once.
+		const PART: usize = 64 * 1024;
+		match (precision, parallel) {
+			(Precision::F64, true) => dest.par_chunks_mut(PART).zip(bytemuck::cast_slice::<u8, f64>(&view).par_chunks(PART)).for_each(|(d, s)| d.copy_from_slice(s)),
+			(Precision::F64, false) => dest.copy_from_slice(bytemuck::cast_slice::<u8, f64>(&view)),
+			(Precision::F32, true) => dest.par_chunks_mut(PART).zip(bytemuck::cast_slice::<u8, f32>(&view).par_chunks(PART)).for_each(|(d, s)| widen(d, s)),
+			(Precision::F32, false) => widen(dest, bytemuck::cast_slice::<u8, f32>(&view)),
+		}
+	}
+	slot.staging.unmap();
+	Ok(())
+}
+
+fn widen(dest: &mut [f64], src: &[f32]) {
+	for (d, &s) in dest.iter_mut().zip(src) {
+		*d = f64::from(s);
+	}
+}
+
+pub const fn precision_bytes(precision: Precision) -> u64 {
 	match precision {
 		Precision::F64 => 8,
 		Precision::F32 => 4,
@@ -225,9 +275,9 @@ const fn precision_bytes(precision: Precision) -> u64 {
 pub struct Slot {
 	precision: Precision,
 	/// Grid points this set can hold.
-	capacity: usize,
+	pub(super) capacity: usize,
 	out: Buffer,
-	staging: Buffer,
+	pub(super) staging: Buffer,
 	params: Buffer,
 	/// Grid times, uploaded per chunk.
 	grid: Buffer,
@@ -259,7 +309,7 @@ impl Pool {
 	}
 }
 
-fn acquire(ctx: &Context, precision: Precision, len: usize) -> Slot {
+pub fn acquire(ctx: &Context, precision: Precision, len: usize) -> Slot {
 	{
 		let mut pool = ctx.pool.lock().unwrap_or_else(PoisonError::into_inner);
 		// The smallest idle set that fits, so a small call doesn't take a huge set.
@@ -276,7 +326,7 @@ fn acquire(ctx: &Context, precision: Precision, len: usize) -> Slot {
 	Slot { precision, capacity, out: buffer("splimes output", capacity as u64 * elem, BufferUsages::STORAGE | BufferUsages::COPY_SRC), staging: buffer("splimes staging", capacity as u64 * elem, BufferUsages::MAP_READ | BufferUsages::COPY_DST), params: buffer("splimes params", 64, BufferUsages::UNIFORM | BufferUsages::COPY_DST), grid: buffer("splimes grid", capacity as u64 * 12, BufferUsages::STORAGE | BufferUsages::COPY_DST) }
 }
 
-fn release(ctx: &Context, slots: Vec<Slot>) {
+pub fn release(ctx: &Context, slots: Vec<Slot>) {
 	let mut pool = ctx.pool.lock().unwrap_or_else(PoisonError::into_inner);
 	pool.idle.extend(slots);
 	let mut total: u64 = pool.idle.iter().map(Slot::bytes).sum();

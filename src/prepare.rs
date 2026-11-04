@@ -54,13 +54,43 @@ impl<'a, V: Value> Knots<'a, V> {
 	/// [`Error::NoPoints`] for empty input; [`Error::ValueOutOfRange`] for a value with no
 	/// finite `f64` representation.
 	pub fn new(len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, parallel: bool) -> Result<Self> {
+		let (mut knots, originals) = Self::prepare(len, timestamp, &value, |_, v| v, parallel)?;
+		knots.originals = originals;
+		Ok(knots)
+	}
+
+	/// [`new`](Self::new), also returning the input index each knot came from, so the
+	/// knots can be [detached](Self::detach) from the input and attached again later.
+	#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+	pub fn new_indexed(len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, parallel: bool) -> Result<(Self, Vec<usize>)> {
+		let (mut knots, indices) = Self::prepare(len, timestamp, &value, |i, _| i, parallel)?;
+		knots.originals = indices.iter().map(|&i| value(i)).collect();
+		Ok((knots, indices))
+	}
+
+	/// The knots without the caller's values, so they can outlive the borrow of the input.
+	#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+	pub fn detach(self) -> Knots<'static, V> {
+		let Self { t0, h, y, offsets, offsets64, originals: _, centre, scale, min, max } = self;
+		Knots { t0, h, y, offsets, offsets64, originals: Vec::new(), centre, scale, min, max }
+	}
+
+	/// Detached knots with the caller's values for each knot, in knot order, again.
+	#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+	pub fn attach<'b>(self, originals: Vec<&'b V>) -> Knots<'b, V> {
+		let Self { t0, h, y, offsets, offsets64, originals: _, centre, scale, min, max } = self;
+		Knots { t0, h, y, offsets, offsets64, originals, centre, scale, min, max }
+	}
+
+	/// The knots, with `originals` left empty, and `tag(i, value(i))` for each knot's input.
+	fn prepare<R: Send + Sync>(len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: &(impl Fn(usize) -> &'a V + Sync), tag: impl Fn(usize, &'a V) -> R + Sync, parallel: bool) -> Result<(Self, Vec<R>)> {
 		if len == 0 {
 			return Err(Error::NoPoints);
 		}
 		// Each value is converted once: for `BigDecimal` that is most of the cost.
 		let sample = |i: usize| {
 			let v = value(i);
-			v.to_finite_f64().map(|y| (posix_nanos(timestamp(i)), y, v)).ok_or(i)
+			v.to_finite_f64().map(|y| (posix_nanos(timestamp(i)), y, tag(i, v))).ok_or(i)
 		};
 		// Every value must be finite, including ones a later duplicate replaces: whether bad
 		// input is reported mustn't depend on its position. The first in input order is named.
@@ -70,7 +100,7 @@ impl<'a, V: Value> Knots<'a, V> {
 			// An indexed collect, which preallocates, with NaN marking a bad value: a converted
 			// value never is NaN.
 			let mut samples = Vec::new();
-			(0..len).into_par_iter().map(|i| sample(i).unwrap_or_else(|_| (0, f64::NAN, value(i)))).collect_into_vec(&mut samples);
+			(0..len).into_par_iter().map(|i| sample(i).unwrap_or_else(|_| (0, f64::NAN, tag(i, value(i))))).collect_into_vec(&mut samples);
 			if let Some(i) = samples.par_iter().position_first(|&(_, y, _)| y.is_nan()) {
 				return Err(out_of_range(i));
 			}
@@ -127,8 +157,8 @@ impl<'a, V: Value> Knots<'a, V> {
 		#[allow(clippy::cast_precision_loss)] // A spacing only needs to be approximately the mean.
 		let h = if n > 1 { offsets[n - 1] as f64 / (n - 1) as f64 } else { 1.0 };
 		let y = raw_values.iter().map(|&v| (v - centre) / scale).collect();
-		let originals = distinct.into_iter().map(|(_, _, v)| v).collect();
-		Ok(Self { t0, h, y, offsets, offsets64, originals, centre, scale, min, max })
+		let tags = distinct.into_iter().map(|(_, _, tag)| tag).collect();
+		Ok((Self { t0, h, y, offsets, offsets64, originals: Vec::new(), centre, scale, min, max }, tags))
 	}
 
 	pub const fn len(&self) -> usize {

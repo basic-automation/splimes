@@ -205,61 +205,101 @@ impl Interpolator {
 
 	/// The `len` samples `(timestamp(i), value(i))`, resampled onto `start..=end`.
 	fn run_generic<'a, V: Value>(&self, len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, (start, end): (DateTime<Utc>, DateTime<Utc>), auto_gpu: bool) -> Result<Interpolation<V>> {
+		let grid = self.grid(start, end)?;
+		let knots = Knots::new(len, timestamp, value, self.backend != Backend::Cpu)?;
+		let (spline, method) = self.method(&knots)?;
+		let mut normalised = self.output(&grid)?;
+		let run = self.compute(&knots, &grid, &method, &mut normalised, auto_gpu)?;
+		assemble(&knots, &grid, &method, &normalised, run, spline, self.spline)
+	}
+
+	/// The checks made before the input is read, and the grid.
+	pub(crate) fn grid(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Grid> {
 		self.spline.validate()?;
 		let grid = Grid::new(start, end, self.resolution)?;
 		if grid.len > self.max_points {
 			return Err(Error::OutputTooLarge { points: grid.len as u128 });
 		}
-		let knots = Knots::new(len, timestamp, value, self.backend != Backend::Cpu)?;
+		Ok(grid)
+	}
+
+	/// The method actually used on these knots, and the kernel computing it.
+	pub(crate) fn method<V: Value>(&self, knots: &Knots<'_, V>) -> Result<(Spline, Method)> {
 		let spline = self.spline.fallback_for(knots.len());
 		if self.exact && knots.len() < self.spline.min_points() {
 			return Err(Error::InsufficientPoints { spline: self.spline, required: self.spline.min_points(), available: knots.len() });
 		}
-		let method = Method::new(spline, &knots);
+		Ok((spline, Method::new(spline, knots)))
+	}
 
-		let parallel = self.backend != Backend::Cpu;
-		let mut normalised = filled(grid.len, 0.0, parallel)?;
-		let run = self.compute(&knots, &grid, &method, &mut normalised, auto_gpu)?;
-		assemble(&knots, &grid, &method, &normalised, run, spline, self.spline)
+	/// The buffer the kernel writes its normalised results to.
+	pub(crate) fn output(&self, grid: &Grid) -> Result<Vec<f64>> {
+		filled(grid.len, 0.0, self.backend != Backend::Cpu)
+	}
+
+	/// The backend a call on `grid` runs on: [`Backend::Auto`] resolved as [`compute`](Self::compute) resolves it.
+	pub(crate) fn resolved_backend(&self, grid: &Grid, auto_gpu: bool) -> Backend {
+		match self.backend {
+			Backend::Auto => crate::auto::choose(grid.len, self.precision, auto_gpu),
+			backend => backend,
+		}
+	}
+
+	#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+	pub(crate) const fn precision(&self) -> Precision {
+		self.precision
 	}
 
 	fn compute<V: Value>(&self, knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64], auto_gpu: bool) -> Result<Run> {
-		let cpu = |backend: Backend, out: &mut [f64], gpu_fallback: Option<Error>| {
-			if backend == Backend::Cpu {
-				kernel::eval_serial(knots, grid, method, out);
-			} else {
-				kernel::eval_parallel(knots, grid, method, out);
+		match self.resolved_backend(grid, auto_gpu) {
+			Backend::Gpu => {
+				let gpu = crate::gpu::eval(knots, grid, method, self.precision, out);
+				self.after_gpu(knots, grid, method, out, gpu)
 			}
-			Run { backend, precision: Precision::F64, gpu_fallback, recomputed: 0 }
-		};
-		let gpu = |out: &mut [f64]| {
-			crate::gpu::eval(knots, grid, method, self.precision, out)?;
-			let unsafe_windows = if self.precision == Precision::F32 { kernel::f32_unsafe_windows(knots, method) } else { None };
-			let recomputed = kernel::repair(knots, grid, method, out, unsafe_windows.as_deref());
-			if recomputed > 0 {
-				log::debug!("splimes: recomputed {recomputed} point(s) in f64 on the CPU that the GPU couldn't compute reliably");
-			}
-			Ok::<_, Error>(Run { backend: Backend::Gpu, precision: self.precision, gpu_fallback: None, recomputed })
-		};
-		match self.backend {
-			Backend::Cpu | Backend::Parallel => Ok(cpu(self.backend, out, None)),
-			Backend::Gpu => gpu(out),
-			Backend::Auto => match crate::auto::choose(grid.len, self.precision, auto_gpu) {
-				Backend::Gpu => match gpu(out) {
-					Ok(run) => Ok(run),
-					Err(e) => {
-						log::warn!("splimes: GPU interpolation failed, rerunning on the CPU: {e}");
-						Ok(cpu(Backend::Parallel, out, Some(e)))
-					}
-				},
-				backend => Ok(cpu(backend, out, None)),
-			},
+			backend => Ok(cpu(knots, grid, method, backend, out, None)),
 		}
+	}
+
+	/// Finishes a GPU computation that ended with `gpu`: repairs the `f32` windows the GPU
+	/// can't compute reliably, or, for [`Backend::Auto`], reruns a failed one on the CPU.
+	pub(crate) fn after_gpu<V: Value>(&self, knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64], gpu: Result<()>) -> Result<Run> {
+		match gpu {
+			Ok(()) => {
+				let unsafe_windows = if self.precision == Precision::F32 { kernel::f32_unsafe_windows(knots, method) } else { None };
+				let recomputed = kernel::repair(knots, grid, method, out, unsafe_windows.as_deref());
+				if recomputed > 0 {
+					log::debug!("splimes: recomputed {recomputed} point(s) in f64 on the CPU that the GPU couldn't compute reliably");
+				}
+				Ok(Run { backend: Backend::Gpu, precision: self.precision, gpu_fallback: None, recomputed })
+			}
+			Err(e) if self.backend == Backend::Auto => {
+				log::warn!("splimes: GPU interpolation failed, rerunning on the CPU: {e}");
+				Ok(cpu(knots, grid, method, Backend::Parallel, out, Some(e)))
+			}
+			Err(e) => Err(e),
+		}
+	}
+
+	/// The output of a GPU computation that ended with `gpu`, as [`run`](Self::run) returns it.
+	#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+	pub(crate) fn finish_gpu<V: Value>(&self, knots: &Knots<'_, V>, grid: &Grid, method: &Method, spline: Spline, out: &mut [f64], gpu: Result<()>) -> Result<Interpolation<V>> {
+		let run = self.after_gpu(knots, grid, method, out, gpu)?;
+		assemble(knots, grid, method, out, run, spline, self.spline)
 	}
 }
 
+/// Computes on a CPU backend.
+fn cpu<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, backend: Backend, out: &mut [f64], gpu_fallback: Option<Error>) -> Run {
+	if backend == Backend::Cpu {
+		kernel::eval_serial(knots, grid, method, out);
+	} else {
+		kernel::eval_parallel(knots, grid, method, out);
+	}
+	Run { backend, precision: Precision::F64, gpu_fallback, recomputed: 0 }
+}
+
 /// How a computation actually ran.
-struct Run {
+pub(crate) struct Run {
 	backend: Backend,
 	precision: Precision,
 	gpu_fallback: Option<Error>,
