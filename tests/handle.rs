@@ -215,6 +215,9 @@ fn gpu_progress_needs_no_rayon_thread() {
 	assert_eq!(handle.wait(), expected);
 }
 
+/// One `run_f64` call's inputs.
+type Case = (Interpolator, Vec<DateTime<Utc>>, Vec<f64>, DateTime<Utc>, DateTime<Utc>);
+
 /// The CPU backends and every refusal come through `submit` as `run` returns them.
 #[test]
 fn cpu_backends_and_refusals_match_run() {
@@ -227,7 +230,6 @@ fn cpu_backends_and_refusals_match_run() {
 		assert_eq!(handle.wait(), interpolator.run_f64(&ts, &vs, start, end));
 	}
 	let gpu = Interpolator::new(Spline::Cubic, Resolution::Seconds).backend(Backend::Gpu);
-	type Case = (Interpolator, Vec<DateTime<Utc>>, Vec<f64>, DateTime<Utc>, DateTime<Utc>);
 	let refusals: Vec<Case> = vec![
 		(gpu, Vec::new(), Vec::new(), start, end),
 		(gpu, ts.clone(), vs.clone(), end, start),
