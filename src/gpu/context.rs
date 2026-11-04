@@ -9,7 +9,7 @@ use std::{
 use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType, ComputePipeline, ComputePipelineDescriptor, DeviceDescriptor, Features, Instance, InstanceDescriptor, Limits, PipelineLayoutDescriptor, PowerPreference, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages};
 
 use super::{
-	GpuConfig, GpuInfo, GpuPoolStats, run::{self, Pool}, shader
+	GpuConfig, GpuInfo, GpuMemoryReport, GpuPoolStats, run::{self, Pool}, shader
 };
 use crate::{Error, Precision, Result};
 
@@ -45,6 +45,16 @@ impl Context {
 
 	pub fn pool_stats(&self) -> GpuPoolStats {
 		self.pool.lock().unwrap_or_else(PoisonError::into_inner).stats()
+	}
+
+	pub fn memory_report(&self) -> Option<GpuMemoryReport> {
+		if self.lost.load(Ordering::Acquire) {
+			return None;
+		}
+		// Frees what completed submissions no longer need; never waits. A failure here
+		// (e.g. a lost device) leaves the report as it is.
+		let _ = self.device.poll(wgpu::PollType::Poll);
+		self.device.generate_allocator_report().map(|r| GpuMemoryReport { allocated_bytes: r.total_allocated_bytes, reserved_bytes: r.total_reserved_bytes, allocations: r.allocations.len(), blocks: r.blocks.len() })
 	}
 }
 
