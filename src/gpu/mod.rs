@@ -112,6 +112,8 @@ pub fn gpu_pool_stats() -> Option<GpuPoolStats> {
 /// Every open device, with its counters, if the GPU has started successfully; the first
 /// is the one [`gpu_info`] reports. Never blocks or starts the GPU.
 #[must_use]
+// Not `const`: whether a public fn is const mustn't depend on a feature.
+#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
 pub fn gpu_devices() -> Vec<GpuDeviceStats> {
 	#[cfg(feature = "gpu")]
 	return context::try_get().map(|devices| devices.list.iter().map(context::Context::stats).collect()).unwrap_or_default();
@@ -119,13 +121,17 @@ pub fn gpu_devices() -> Vec<GpuDeviceStats> {
 	Vec::new()
 }
 
-/// The adapters wgpu offers on this machine, in the order [`AdapterSelector::Index`]
-/// counts, without opening any (`WGPU_BACKEND` limits the APIs listed). An adapter can
-/// appear once per graphics API. Empty without the `gpu` feature or any adapter.
+/// The adapters wgpu offers on this machine, without opening any.
+///
+/// In the order [`AdapterSelector::Index`] counts; `WGPU_BACKEND` limits the APIs listed,
+/// and an adapter can appear once per graphics API. Empty without the `gpu` feature or
+/// any adapter.
 ///
 /// Listing loads the graphics drivers, as starting the GPU does: call it from the thread
 /// that will start the GPU, not from a thread of its own (see the crate docs' "Backends").
 #[must_use]
+// Not `const`: whether a public fn is const mustn't depend on a feature.
+#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
 pub fn gpu_adapters() -> Vec<GpuAdapterInfo> {
 	#[cfg(feature = "gpu")]
 	return context::adapters();

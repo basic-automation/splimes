@@ -67,6 +67,8 @@ fn split_eval<V: Value>(usable: &[&Context], chunk: usize, knots: &Knots<'_, V>,
 		result
 	};
 	let results: Vec<Result<()>> = std::thread::scope(|scope| {
+		// Collected so every other device starts before this thread drives the first.
+		#[allow(clippy::needless_collect)]
 		let others: Vec<_> = usable[1..].iter().map(|&ctx| scope.spawn(move || worker(ctx))).collect();
 		let mut results = vec![worker(usable[0])];
 		results.extend(others.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(Error::Gpu("a GPU worker thread panicked".to_owned())))));
@@ -95,7 +97,7 @@ mod tests {
 
 	/// An irregular series of `n` knots and its grid at one-second resolution.
 	fn series(n: usize) -> (Vec<DateTime<Utc>>, Vec<f64>) {
-		let ts: Vec<_> = (0..n as i64).map(|i| at(i * 10 + (i * 7919) % 7)).collect();
+		let ts: Vec<_> = (0..i64::try_from(n).expect("small")).map(|i| at(i * 10 + (i * 7919) % 7)).collect();
 		let values = (0..n).map(|i| (i as f64 * 0.37).sin() * 100.0 + i as f64).collect();
 		(ts, values)
 	}
@@ -138,7 +140,7 @@ mod tests {
 			let name = &one.primary().info.name;
 			let precisions = if one.primary().f64.is_some() { vec![Precision::F64, Precision::F32] } else { vec![Precision::F32] };
 			for precision in precisions {
-				for spline in [Spline::Linear, Spline::Quadratic, Spline::Cubic, Spline::Polynomial(5)] {
+				for spline in [Spline::Linear, Spline::Quadratic, Spline::Cubic, Spline::Polynomial(5, None), Spline::Polynomial(5, Some(2.0))] {
 					let single = run(&one, spline, precision, 300);
 					let split = run(&two, spline, precision, 300);
 					assert!(split.iter().all(|v| v.is_finite()), "{name}: every point written");
@@ -175,7 +177,7 @@ mod tests {
 		let f64_both = da.primary().f64.is_some() && db.primary().f64.is_some();
 		let precisions = if f64_both { vec![Precision::F64, Precision::F32] } else { vec![Precision::F32] };
 		for precision in precisions {
-			for spline in [Spline::Linear, Spline::Cubic, Spline::Polynomial(5)] {
+			for spline in [Spline::Linear, Spline::Cubic, Spline::Polynomial(5, Some(2.0))] {
 				let (ra, rb, split) = (run(&da, spline, precision, 300), run(&db, spline, precision, 300), run(&both, spline, precision, 300));
 				let differ = ra.iter().zip(&rb).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
 				eprintln!("{names} {spline:?} {precision}: the adapters differ at {differ} of {} points", ra.len());
