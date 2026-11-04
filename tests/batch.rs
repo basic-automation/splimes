@@ -84,7 +84,7 @@ fn same_f64(batch: &splimes::Result<Interpolation<f64>>, alone: &splimes::Result
 }
 
 fn check_f64(interpolator: Interpolator, jobs: &[Job], what: &str) {
-	let tuples: Vec<(&[DateTime<Utc>], &[f64], DateTime<Utc>, DateTime<Utc>)> = jobs.iter().map(|j| (j.timestamps.as_slice(), j.values.as_slice(), j.start, j.end)).collect();
+	let tuples: Vec<_> = jobs.iter().map(|j| (j.timestamps.as_slice(), j.values.as_slice(), j.start, j.end)).collect();
 	let batch = interpolator.run_f64_batch(&tuples);
 	assert_eq!(batch.len(), jobs.len());
 	for (i, (b, j)) in batch.iter().zip(jobs).enumerate() {

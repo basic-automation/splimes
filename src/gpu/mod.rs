@@ -125,6 +125,8 @@ pub fn eval<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precis
 }
 
 /// One series of a batch: its prepared knots, grid and method.
+// Read only by the GPU path, which is compiled out without the `gpu` feature.
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
 pub struct BatchJob<'j, 'a, V> {
 	pub knots: &'j Knots<'a, V>,
 	pub grid: &'j Grid,
