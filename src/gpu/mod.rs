@@ -124,6 +124,27 @@ pub fn eval<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precis
 	Err(no_gpu_feature())
 }
 
+/// One series of a batch: its prepared knots, grid and method.
+pub struct BatchJob<'j, 'a, V> {
+	pub knots: &'j Knots<'a, V>,
+	pub grid: &'j Grid,
+	pub method: &'j Method,
+}
+
+/// Runs many series on the GPU in as few submissions as it allows (see `run::eval_batch`),
+/// writing each one's normalised results to the matching `outs` slice. One result per
+/// series.
+#[cfg_attr(not(feature = "gpu"), allow(unused_variables, clippy::needless_pass_by_ref_mut))]
+pub fn eval_batch<V: Value>(jobs: &[BatchJob<'_, '_, V>], precision: Precision, outs: &mut [&mut [f64]]) -> Vec<Result<()>> {
+	#[cfg(feature = "gpu")]
+	return match context::get() {
+		Ok(ctx) => run::eval_batch(ctx, jobs, precision, outs),
+		Err(e) => vec![Err(e); jobs.len()],
+	};
+	#[cfg(not(feature = "gpu"))]
+	vec![Err(no_gpu_feature()); jobs.len()]
+}
+
 /// Whether the GPU is open and can run `precision`. Never blocks and never opens it:
 /// [`Backend::Auto`](crate::Backend::Auto) uses only a GPU the caller has started.
 #[cfg_attr(not(feature = "gpu"), allow(unused_variables, clippy::missing_const_for_fn))]

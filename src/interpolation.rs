@@ -203,8 +203,128 @@ impl Interpolator {
 		self.run_generic(timestamps.len(), |i| timestamps[i], |i| &values[i], (start, end), auto_gpu)
 	}
 
+	/// Resamples several independent series at once, each onto its own grid
+	/// `start, start + step, …, ≤ end`, returning one result per job in order.
+	///
+	/// Each result is exactly what [`run`](Self::run) returns for that job alone, value for
+	/// value and with the same report (backend, precision, recomputed points, GPU
+	/// fallback), and each job is refused, or not, as `run` would refuse it: one job's error
+	/// doesn't affect the others.
+	///
+	/// What batching changes is how the work reaches the device. On [`Backend::Gpu`] (and
+	/// for the jobs [`Backend::Auto`] sends there), every series whose grid fits in one
+	/// dispatch chunk ([`GpuConfig::chunk_points`](crate::GpuConfig::chunk_points)) is
+	/// packed with others into one command encoder, one queue submission and one read-back
+	/// mapping, instead of one of each per series; larger series run as they would alone.
+	/// Many small series — the usual shape of a query over many time series — then pay the
+	/// per-call submission and synchronisation cost once per batch instead of once per
+	/// series. A device error fails (or, under `Auto`, sends back to the CPU) every series
+	/// that shared its submission. On [`Backend::Parallel`] the jobs run concurrently on
+	/// rayon's pool; on [`Backend::Cpu`], one after another on the calling thread.
+	///
+	/// # Errors
+	///
+	/// Per job, as [`run`](Self::run).
+	#[must_use]
+	pub fn run_batch(&self, jobs: &[(&[Point], DateTime<Utc>, DateTime<Utc>)]) -> Vec<Result<Interpolation<BigDecimal>>> {
+		self.run_batch_generic(jobs.len(), |j| {
+			let (points, start, end) = jobs[j];
+			self.prepare(points.len(), |i| points[i].timestamp, |i| &points[i].value, (start, end))
+		})
+	}
+
+	/// [`run_batch`](Self::run_batch) for `f64` samples, each job given as parallel
+	/// columns `(timestamps, values, start, end)`: [`run_f64`](Self::run_f64) for many
+	/// series at once.
+	///
+	/// # Errors
+	///
+	/// Per job, as [`run_f64`](Self::run_f64).
+	#[must_use]
+	// A tuple per job, as `run_f64`'s arguments, keeps call sites plain.
+	#[allow(clippy::type_complexity)]
+	pub fn run_f64_batch(&self, jobs: &[(&[DateTime<Utc>], &[f64], DateTime<Utc>, DateTime<Utc>)]) -> Vec<Result<Interpolation<f64>>> {
+		self.run_batch_generic(jobs.len(), |j| {
+			let (timestamps, values, start, end) = jobs[j];
+			if timestamps.len() != values.len() {
+				return Err(Error::LengthMismatch { timestamps: timestamps.len(), values: values.len() });
+			}
+			self.prepare(timestamps.len(), |i| timestamps[i], |i| &values[i], (start, end))
+		})
+	}
+
+	/// The `jobs` series `prepare(j)`, each computed as [`run_generic`](Self::run_generic)
+	/// would, with the GPU ones submitted together.
+	fn run_batch_generic<'a, V: Value>(&self, jobs: usize, prepare: impl Fn(usize) -> Result<Prepared<'a, V>> + Sync) -> Vec<Result<Interpolation<V>>> {
+		match self.backend {
+			Backend::Cpu => (0..jobs).map(|j| prepare(j).and_then(|p| self.finish(&p, true))).collect(),
+			Backend::Parallel => (0..jobs).into_par_iter().map(|j| prepare(j).and_then(|p| self.finish(&p, true))).collect(),
+			Backend::Gpu | Backend::Auto => {
+				let prepared: Vec<Result<Prepared<'a, V>>> = (0..jobs).into_par_iter().map(&prepare).collect();
+				// The jobs that run on the GPU, by the choice `run` would make for each alone.
+				let on_gpu: Vec<usize> = prepared.iter().enumerate().filter(|(_, p)| p.as_ref().is_ok_and(|p| self.backend == Backend::Gpu || crate::auto::choose(p.grid.len, self.precision, true) == Backend::Gpu)).map(|(j, _)| j).collect();
+				let mut results: Vec<Option<Result<Interpolation<V>>>> = (0..jobs).map(|_| None).collect();
+				let mut batch = Vec::with_capacity(on_gpu.len());
+				let mut outs = Vec::with_capacity(on_gpu.len());
+				for &j in &on_gpu {
+					let Ok(p) = &prepared[j] else { continue };
+					match filled(p.grid.len, 0.0, true) {
+						Ok(out) => {
+							batch.push(j);
+							outs.push(out);
+						}
+						Err(e) => results[j] = Some(Err(e)),
+					}
+				}
+				let gpu_jobs: Vec<crate::gpu::BatchJob<'_, 'a, V>> = batch
+					.iter()
+					.map(|&j| {
+						let p = prepared[j].as_ref().expect("prepared");
+						crate::gpu::BatchJob { knots: &p.knots, grid: &p.grid, method: &p.method }
+					})
+					.collect();
+				let gpu_results = {
+					let mut slices: Vec<&mut [f64]> = outs.iter_mut().map(Vec::as_mut_slice).collect();
+					crate::gpu::eval_batch(&gpu_jobs, self.precision, &mut slices)
+				};
+				drop(gpu_jobs);
+				let gpu: Vec<(usize, Vec<f64>, Result<()>)> = batch.into_iter().zip(outs).zip(gpu_results).map(|((j, out), r)| (j, out, r)).collect();
+				let finished: Vec<(usize, Result<Interpolation<V>>)> = gpu
+					.into_par_iter()
+					.map(|(j, mut out, r)| {
+						let p = prepared[j].as_ref().expect("prepared");
+						let run = match r {
+							Ok(()) => Ok(self.gpu_run(p, &mut out)),
+							Err(e) if self.backend == Backend::Auto => {
+								log::warn!("splimes: GPU interpolation failed, rerunning on the CPU: {e}");
+								Ok(cpu_run(Backend::Parallel, p, &mut out, Some(e)))
+							}
+							Err(e) => Err(e),
+						};
+						(j, run.and_then(|run| assemble(&p.knots, &p.grid, &p.method, &out, run, p.spline, self.spline)))
+					})
+					.collect();
+				for (j, r) in finished {
+					results[j] = Some(r);
+				}
+				prepared.into_par_iter()
+					.zip(results)
+					// Not done yet: refused while preparing, or a job `Auto` keeps on the CPU.
+					.map(|(p, done)| done.unwrap_or_else(|| p.and_then(|p| self.finish(&p, true))))
+					.collect()
+			}
+		}
+	}
+
 	/// The `len` samples `(timestamp(i), value(i))`, resampled onto `start..=end`.
-	fn run_generic<'a, V: Value>(&self, len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, (start, end): (DateTime<Utc>, DateTime<Utc>), auto_gpu: bool) -> Result<Interpolation<V>> {
+	fn run_generic<'a, V: Value>(&self, len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, range: (DateTime<Utc>, DateTime<Utc>), auto_gpu: bool) -> Result<Interpolation<V>> {
+		let prepared = self.prepare(len, timestamp, value, range)?;
+		self.finish(&prepared, auto_gpu)
+	}
+
+	/// Validates the request and prepares the knots, grid and method, refusing in the
+	/// order every entry point documents.
+	fn prepare<'a, V: Value>(&self, len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, (start, end): (DateTime<Utc>, DateTime<Utc>)) -> Result<Prepared<'a, V>> {
 		self.spline.validate()?;
 		let grid = Grid::new(start, end, self.resolution)?;
 		if grid.len > self.max_points {
@@ -216,46 +336,66 @@ impl Interpolator {
 			return Err(Error::InsufficientPoints { spline: self.spline, required: self.spline.min_points(), available: knots.len() });
 		}
 		let method = Method::new(spline, &knots);
-
-		let parallel = self.backend != Backend::Cpu;
-		let mut normalised = filled(grid.len, 0.0, parallel)?;
-		let run = self.compute(&knots, &grid, &method, &mut normalised, auto_gpu)?;
-		assemble(&knots, &grid, &method, &normalised, run, spline, self.spline)
+		Ok(Prepared { knots, grid, spline, method })
 	}
 
-	fn compute<V: Value>(&self, knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64], auto_gpu: bool) -> Result<Run> {
-		let cpu = |backend: Backend, out: &mut [f64], gpu_fallback: Option<Error>| {
-			if backend == Backend::Cpu {
-				kernel::eval_serial(knots, grid, method, out);
-			} else {
-				kernel::eval_parallel(knots, grid, method, out);
-			}
-			Run { backend, precision: Precision::F64, gpu_fallback, recomputed: 0 }
-		};
+	/// Computes and assembles a prepared series.
+	fn finish<V: Value>(&self, p: &Prepared<'_, V>, auto_gpu: bool) -> Result<Interpolation<V>> {
+		let parallel = self.backend != Backend::Cpu;
+		let mut normalised = filled(p.grid.len, 0.0, parallel)?;
+		let run = self.compute(p, &mut normalised, auto_gpu)?;
+		assemble(&p.knots, &p.grid, &p.method, &normalised, run, p.spline, self.spline)
+	}
+
+	fn compute<V: Value>(&self, p: &Prepared<'_, V>, out: &mut [f64], auto_gpu: bool) -> Result<Run> {
 		let gpu = |out: &mut [f64]| {
-			crate::gpu::eval(knots, grid, method, self.precision, out)?;
-			let unsafe_windows = if self.precision == Precision::F32 { kernel::f32_unsafe_windows(knots, method) } else { None };
-			let recomputed = kernel::repair(knots, grid, method, out, unsafe_windows.as_deref());
-			if recomputed > 0 {
-				log::debug!("splimes: recomputed {recomputed} point(s) in f64 on the CPU that the GPU couldn't compute reliably");
-			}
-			Ok::<_, Error>(Run { backend: Backend::Gpu, precision: self.precision, gpu_fallback: None, recomputed })
+			crate::gpu::eval(&p.knots, &p.grid, &p.method, self.precision, out)?;
+			Ok::<_, Error>(self.gpu_run(p, out))
 		};
 		match self.backend {
-			Backend::Cpu | Backend::Parallel => Ok(cpu(self.backend, out, None)),
+			Backend::Cpu | Backend::Parallel => Ok(cpu_run(self.backend, p, out, None)),
 			Backend::Gpu => gpu(out),
-			Backend::Auto => match crate::auto::choose(grid.len, self.precision, auto_gpu) {
+			Backend::Auto => match crate::auto::choose(p.grid.len, self.precision, auto_gpu) {
 				Backend::Gpu => match gpu(out) {
 					Ok(run) => Ok(run),
 					Err(e) => {
 						log::warn!("splimes: GPU interpolation failed, rerunning on the CPU: {e}");
-						Ok(cpu(Backend::Parallel, out, Some(e)))
+						Ok(cpu_run(Backend::Parallel, p, out, Some(e)))
 					}
 				},
-				backend => Ok(cpu(backend, out, None)),
+				backend => Ok(cpu_run(backend, p, out, None)),
 			},
 		}
 	}
+
+	/// After the GPU has written `out`: recomputes on the CPU the points it couldn't
+	/// compute reliably, and reports the run.
+	fn gpu_run<V: Value>(&self, p: &Prepared<'_, V>, out: &mut [f64]) -> Run {
+		let unsafe_windows = if self.precision == Precision::F32 { kernel::f32_unsafe_windows(&p.knots, &p.method) } else { None };
+		let recomputed = kernel::repair(&p.knots, &p.grid, &p.method, out, unsafe_windows.as_deref());
+		if recomputed > 0 {
+			log::debug!("splimes: recomputed {recomputed} point(s) in f64 on the CPU that the GPU couldn't compute reliably");
+		}
+		Run { backend: Backend::Gpu, precision: self.precision, gpu_fallback: None, recomputed }
+	}
+}
+
+/// A validated request: its knots, grid, the method stepped down to fit, and its kernel.
+struct Prepared<'a, V> {
+	knots: Knots<'a, V>,
+	grid: Grid,
+	spline: Spline,
+	method: Method,
+}
+
+/// Computes `p` on a CPU backend.
+fn cpu_run<V: Value>(backend: Backend, p: &Prepared<'_, V>, out: &mut [f64], gpu_fallback: Option<Error>) -> Run {
+	if backend == Backend::Cpu {
+		kernel::eval_serial(&p.knots, &p.grid, &p.method, out);
+	} else {
+		kernel::eval_parallel(&p.knots, &p.grid, &p.method, out);
+	}
+	Run { backend, precision: Precision::F64, gpu_fallback, recomputed: 0 }
 }
 
 /// How a computation actually ran.
@@ -588,5 +728,34 @@ mod tests {
 		}
 		// Without a failure there is nothing to report.
 		assert_eq!(parallel.gpu_fallback(), None);
+	}
+
+	/// A batch fails over as `run` does, per job: `Auto` reruns each GPU job on the CPU and
+	/// reports why, an explicit GPU request returns the error for each.
+	#[cfg(feature = "gpu")]
+	#[test]
+	fn a_batch_falls_back_to_the_cpu_as_run_does() {
+		if crate::prewarm_gpu().is_err() {
+			eprintln!("a_batch_falls_back_to_the_cpu_as_run_does: skipped, no GPU");
+			return;
+		}
+		let ts: Vec<DateTime<Utc>> = (0..6).map(|i| at(i * 3)).collect();
+		let vs: Vec<f64> = vec![0.0, 9.0, 1.0, 10.0, 4.0, 7.0];
+		let jobs = [(&ts[..], &vs[..], at(-2), at(20)), (&ts[..2], &vs[..2], at(0), at(4)), (&ts[..0], &vs[..0], at(0), at(4))];
+		for precision in [Precision::F64, Precision::F32] {
+			let interpolator = Interpolator::new(Spline::Cubic, Resolution::Seconds).gpu_precision(precision);
+			crate::auto::FORCE_GPU.set(true);
+			crate::gpu::run::tests::FAIL.set(true);
+			let auto = interpolator.run_f64_batch(&jobs);
+			let auto_alone: Vec<_> = jobs.iter().map(|&(t, v, s, e)| interpolator.run_f64(t, v, s, e)).collect();
+			let explicit = interpolator.backend(Backend::Gpu).run_f64_batch(&jobs);
+			crate::auto::FORCE_GPU.set(false);
+			crate::gpu::run::tests::FAIL.set(false);
+			assert_eq!(auto, auto_alone, "{precision}");
+			assert!(auto[..2].iter().all(|r| r.as_ref().is_ok_and(|r| r.backend() == Backend::Parallel && r.gpu_fallback() == Some(&Error::Gpu("injected failure".to_owned())))), "{precision}: {auto:?}");
+			assert_eq!(auto[2], Err(Error::NoPoints), "a refusal is still the refusal");
+			assert_eq!(explicit[..2], [Err(Error::Gpu("injected failure".to_owned())), Err(Error::Gpu("injected failure".to_owned()))]);
+			assert_eq!(explicit[2], Err(Error::NoPoints));
+		}
 	}
 }
