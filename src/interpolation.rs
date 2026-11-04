@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use crate::{
-	Error, Point, PointKind, Resolution, Result, Spline, kernel::{self, Method, Nanos}, prepare::Knots, time::{Clock, Grid}, value::Value
+	Error, Point, PointKind, Resolution, Result, Spline, TickUnit, kernel::{self, Method, Nanos}, prepare::Knots, time::{Clock, Grid}, value::Value
 };
 
 /// Where an interpolation runs.
@@ -100,6 +100,8 @@ pub struct Interpolator {
 	precision: Precision,
 	exact: bool,
 	max_points: usize,
+	/// Grid points per streamed chunk; 0 means [`GpuConfig::chunk_points`](crate::GpuConfig::chunk_points).
+	stream_chunk: usize,
 }
 
 impl Interpolator {
@@ -107,7 +109,7 @@ impl Interpolator {
 	/// [`Precision::F64`], stepping the method down when there are too few points.
 	#[must_use]
 	pub const fn new(spline: Spline, resolution: Resolution) -> Self {
-		Self { spline, resolution, backend: Backend::Auto, precision: Precision::F64, exact: false, max_points: usize::MAX }
+		Self { spline, resolution, backend: Backend::Auto, precision: Precision::F64, exact: false, max_points: usize::MAX, stream_chunk: 0 }
 	}
 
 	/// Where to run.
@@ -144,6 +146,23 @@ impl Interpolator {
 	pub const fn max_points(mut self, points: usize) -> Self {
 		self.max_points = points;
 		self
+	}
+
+	/// The most grid points each chunk of a streamed run ([`stream_f64`](Self::stream_f64),
+	/// [`stream_epoch`](Self::stream_epoch)) holds. Zero, the default, means the GPU's
+	/// [`GpuConfig::chunk_points`](crate::GpuConfig::chunk_points), on every backend. On the
+	/// GPU a chunk is also at most what one dispatch can hold, so chunks may be smaller.
+	/// Non-streamed runs ignore it.
+	#[must_use]
+	pub const fn stream_chunk_points(mut self, points: usize) -> Self {
+		self.stream_chunk = points;
+		self
+	}
+
+	/// Grid points per streamed chunk, as [`stream_chunk_points`](Self::stream_chunk_points)
+	/// documents.
+	pub(crate) fn stream_chunk(&self) -> usize {
+		if self.stream_chunk == 0 { crate::gpu_config().chunk_points.max(1) as usize } else { self.stream_chunk }
 	}
 
 	/// The configured method.
@@ -203,39 +222,79 @@ impl Interpolator {
 		self.run_generic(timestamps.len(), |i| timestamps[i], |i| &values[i], (start, end), auto_gpu)
 	}
 
+	/// [`run_f64`](Self::run_f64) for samples given as epoch ticks: `ticks[i]` is
+	/// `ticks[i] × unit` after the Unix epoch, on the POSIX scale, and so are `start` and
+	/// `end`. No `DateTime` is built for the input; the result is bit-identical to
+	/// `run_f64` on the same instants, on every backend and precision.
+	///
+	/// # Errors
+	///
+	/// As [`run_f64`](Self::run_f64), plus [`Error::TickOutOfRange`] for a tick (input,
+	/// `start` or `end`) outside the instants chrono can represent.
+	pub fn run_epoch(&self, ticks: &[i64], unit: TickUnit, values: &[f64], start: i64, end: i64) -> Result<Interpolation<f64>> {
+		if ticks.len() != values.len() {
+			return Err(Error::LengthMismatch { timestamps: ticks.len(), values: values.len() });
+		}
+		let prepared = self.prepare(|| unit.grid(start, end, self.resolution), || unit.knots(ticks, values, self.backend != Backend::Cpu))?;
+		self.finish(prepared, true)
+	}
+
 	/// The `len` samples `(timestamp(i), value(i))`, resampled onto `start..=end`.
 	fn run_generic<'a, V: Value>(&self, len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, (start, end): (DateTime<Utc>, DateTime<Utc>), auto_gpu: bool) -> Result<Interpolation<V>> {
+		let prepared = self.prepare(|| Grid::new(start, end, self.resolution), || Knots::new(len, timestamp, value, self.backend != Backend::Cpu))?;
+		self.finish(prepared, auto_gpu)
+	}
+
+	/// Validates a request, in the order every entry point checks it, and prepares its
+	/// grid, knots and kernel.
+	pub(crate) fn prepare<'a, V: Value>(&self, grid: impl FnOnce() -> Result<Grid>, knots: impl FnOnce() -> Result<Knots<'a, V>>) -> Result<Prepared<'a, V>> {
 		self.spline.validate()?;
-		let grid = Grid::new(start, end, self.resolution)?;
+		let grid = grid()?;
 		if grid.len > self.max_points {
 			return Err(Error::OutputTooLarge { points: grid.len as u128 });
 		}
-		let knots = Knots::new(len, timestamp, value, self.backend != Backend::Cpu)?;
+		let knots = knots()?;
 		let spline = self.spline.fallback_for(knots.len());
 		if self.exact && knots.len() < self.spline.min_points() {
 			return Err(Error::InsufficientPoints { spline: self.spline, required: self.spline.min_points(), available: knots.len() });
 		}
 		let method = Method::new(spline, &knots);
+		Ok(Prepared { grid, knots, spline, method })
+	}
 
+	/// Computes and assembles a prepared request.
+	fn finish<V: Value>(&self, Prepared { grid, knots, spline, method }: Prepared<'_, V>, auto_gpu: bool) -> Result<Interpolation<V>> {
 		let parallel = self.backend != Backend::Cpu;
 		let mut normalised = filled(grid.len, 0.0, parallel)?;
 		let run = self.compute(&knots, &grid, &method, &mut normalised, auto_gpu)?;
 		assemble(&knots, &grid, &method, &normalised, run, spline, self.spline)
 	}
 
+	pub(crate) const fn backend_choice(&self) -> Backend {
+		self.backend
+	}
+
+	pub(crate) const fn precision_choice(&self) -> Precision {
+		self.precision
+	}
+
+	pub(crate) const fn requested(&self) -> Spline {
+		self.spline
+	}
+
 	fn compute<V: Value>(&self, knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64], auto_gpu: bool) -> Result<Run> {
 		let cpu = |backend: Backend, out: &mut [f64], gpu_fallback: Option<Error>| {
 			if backend == Backend::Cpu {
-				kernel::eval_serial(knots, grid, method, out);
+				kernel::eval_serial(knots, grid, method, 0, out);
 			} else {
-				kernel::eval_parallel(knots, grid, method, out);
+				kernel::eval_parallel(knots, grid, method, 0, out);
 			}
 			Run { backend, precision: Precision::F64, gpu_fallback, recomputed: 0 }
 		};
 		let gpu = |out: &mut [f64]| {
 			crate::gpu::eval(knots, grid, method, self.precision, out)?;
 			let unsafe_windows = if self.precision == Precision::F32 { kernel::f32_unsafe_windows(knots, method) } else { None };
-			let recomputed = kernel::repair(knots, grid, method, out, unsafe_windows.as_deref());
+			let recomputed = kernel::repair(knots, grid, method, 0, out, unsafe_windows.as_deref());
 			if recomputed > 0 {
 				log::debug!("splimes: recomputed {recomputed} point(s) in f64 on the CPU that the GPU couldn't compute reliably");
 			}
@@ -258,6 +317,15 @@ impl Interpolator {
 	}
 }
 
+/// A validated request, ready to compute.
+pub(crate) struct Prepared<'a, V> {
+	pub grid: Grid,
+	pub knots: Knots<'a, V>,
+	/// The method actually used.
+	pub spline: Spline,
+	pub method: Method,
+}
+
 /// How a computation actually ran.
 struct Run {
 	backend: Backend,
@@ -267,7 +335,7 @@ struct Run {
 }
 
 /// Grid points per rayon task when assembling output.
-const ASSEMBLE_CHUNK: usize = 16 * 1024;
+pub(crate) const ASSEMBLE_CHUNK: usize = 16 * 1024;
 
 /// A `len`-element vector of `value`, or [`Error::OutputTooLarge`] if it can't be
 /// allocated. With `parallel`, rayon fills large ones, so first-touch page faults — most
@@ -355,7 +423,7 @@ impl<V: Value> Columns<V> {
 
 /// The provenance walk: where grid point `k` falls among the knots. Ascending indices
 /// advance by addition and a forward scan; any other index seeks with a binary search.
-struct Walk<N> {
+pub(crate) struct Walk<N> {
 	/// The index `offset` and `cursor` describe.
 	next: usize,
 	/// Nanoseconds from the first knot to the last grid point visited.
@@ -367,14 +435,14 @@ struct Walk<N> {
 }
 
 impl<N: Nanos> Walk<N> {
-	const fn new(step: N) -> Self {
+	pub(crate) const fn new(step: N) -> Self {
 		Self { next: usize::MAX, offset: step, step, cursor: 0 }
 	}
 
 	/// Point `k`'s provenance and value, from its normalised kernel result `y`; `None` if the
 	/// value isn't finite in the caller's units. `offsets` are the knots' offsets from the
 	/// first knot, so `offsets[0]` is zero.
-	fn point<V: Value>(&mut self, offsets: &[N], knots: &Knots<'_, V>, grid: &Grid, method: &Method, k: usize, y: f64) -> (PointKind, Option<V>) {
+	pub(crate) fn point<V: Value>(&mut self, offsets: &[N], knots: &Knots<'_, V>, grid: &Grid, method: &Method, k: usize, y: f64) -> (PointKind, Option<V>) {
 		if k == self.next {
 			self.offset = self.offset + self.step;
 		} else {

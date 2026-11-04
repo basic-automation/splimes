@@ -3,17 +3,20 @@
 //! ```text
 //! cargo bench --bench interpolation                 # everything
 //! cargo bench --bench interpolation -- backends     # one group
+//! cargo bench --bench interpolation -- stream       # time to first chunk
 //! ```
 //!
 //! Every group interpolates a deterministic irregular series (a sine with jittered knot
 //! spacing) onto a millisecond grid spanning it, so the whole grid is interpolation.
 
-use std::hint::black_box;
+use std::{
+	hint::black_box, ops::ControlFlow, time::{Duration, Instant}
+};
 
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, TimeDelta, Utc};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use splimes::{Backend, Interpolator, Point, Precision, Resolution, Spline};
+use splimes::{Backend, Interpolator, Point, Precision, Resolution, Spline, TickUnit};
 
 struct Series {
 	timestamps: Vec<DateTime<Utc>>,
@@ -138,5 +141,87 @@ fn small(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, backends, methods, bigdecimal, inputs, prepare, small);
+/// Time to first output: `run_f64` (nothing is usable until the whole grid is), against
+/// the first chunk of `stream_f64` and `stream_epoch` (epoch microseconds in, ticks out),
+/// and their totals, in chunks of 256 Ki points.
+fn stream(c: &mut Criterion) {
+	const CHUNK: usize = 1 << 18;
+	let gpu = gpu_precisions();
+	let mut group = c.benchmark_group("stream");
+	group.sample_size(10);
+	for points in [1_i64 << 20, 1 << 24] {
+		let s = series(4096, points);
+		let micros = |t: DateTime<Utc>| (t - DateTime::<Utc>::UNIX_EPOCH).num_microseconds().expect("fits");
+		let ticks: Vec<i64> = s.timestamps.iter().map(|&t| micros(t)).collect();
+		let (start, end) = (micros(s.start), micros(s.end));
+		group.throughput(Throughput::Elements(points as u64));
+		let mut configs = vec![("parallel", Backend::Parallel, Precision::F64)];
+		configs.extend(gpu.iter().map(|&p| (if p == Precision::F64 { "gpu-f64" } else { "gpu-f32" }, Backend::Gpu, p)));
+		for (name, backend, precision) in configs {
+			let interpolator = Interpolator::new(Spline::Cubic, Resolution::Milliseconds).backend(backend).gpu_precision(precision).stream_chunk_points(CHUNK);
+			group.bench_with_input(BenchmarkId::new(format!("{name}/run_f64"), points), &s, |b, s| b.iter(|| black_box(interpolator.run_f64(&s.timestamps, &s.values, s.start, s.end).expect("runs"))));
+			// Times the first chunk's arrival, then lets the run finish so every sample starts
+			// from the same state.
+			group.bench_with_input(BenchmarkId::new(format!("{name}/stream_f64-first"), points), &s, |b, s| {
+				b.iter_custom(|iters| {
+					let mut total = Duration::ZERO;
+					for _ in 0..iters {
+						let began = Instant::now();
+						let mut first = None;
+						interpolator
+							.stream_f64(&s.timestamps, &s.values, s.start, s.end, |chunk| {
+								first.get_or_insert_with(|| began.elapsed());
+								black_box(chunk.values());
+								ControlFlow::Continue(())
+							})
+							.expect("runs");
+						total += first.expect("a chunk");
+					}
+					total
+				});
+			});
+			group.bench_with_input(BenchmarkId::new(format!("{name}/stream_f64-total"), points), &s, |b, s| {
+				b.iter(|| {
+					interpolator
+						.stream_f64(&s.timestamps, &s.values, s.start, s.end, |chunk| {
+							black_box(chunk.values());
+							ControlFlow::Continue(())
+						})
+						.expect("runs")
+				})
+			});
+			group.bench_with_input(BenchmarkId::new(format!("{name}/stream_epoch-first"), points), &ticks, |b, ticks| {
+				b.iter_custom(|iters| {
+					let mut total = Duration::ZERO;
+					for _ in 0..iters {
+						let began = Instant::now();
+						let mut first = None;
+						interpolator
+							.stream_epoch(ticks, TickUnit::MICROSECONDS, &s.values, start, end, |chunk| {
+								first.get_or_insert_with(|| began.elapsed());
+								black_box(chunk.values());
+								ControlFlow::Continue(())
+							})
+							.expect("runs");
+						total += first.expect("a chunk");
+					}
+					total
+				});
+			});
+			group.bench_with_input(BenchmarkId::new(format!("{name}/stream_epoch-total"), points), &ticks, |b, ticks| {
+				b.iter(|| {
+					interpolator
+						.stream_epoch(ticks, TickUnit::MICROSECONDS, &s.values, start, end, |chunk| {
+							black_box(chunk.times());
+							ControlFlow::Continue(())
+						})
+						.expect("runs")
+				})
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, backends, methods, bigdecimal, inputs, prepare, small, stream);
 criterion_main!(benches);
