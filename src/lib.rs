@@ -163,7 +163,7 @@
 pub use auto::{AutoThresholds, auto_thresholds, set_auto_thresholds};
 pub use calibrate::{Calibration, CalibrationSample, calibrate};
 pub use error::{Error, Result};
-pub use gpu::{GpuConfig, GpuInfo, GpuPoolStats, configure_gpu, gpu_config, gpu_info, gpu_pool_stats, prewarm_gpu, prewarm_gpu_with_config};
+pub use gpu::{GpuConfig, GpuInfo, GpuMemoryReport, GpuPoolStats, configure_gpu, gpu_config, gpu_info, gpu_memory_report, gpu_pool_stats, prewarm_gpu, prewarm_gpu_with_config};
 pub use interpolation::{Backend, Interpolation, Interpolator, Precision, interpolate};
 pub use point::{Point, PointKind};
 pub use resolution::Resolution;
