@@ -9,7 +9,7 @@ use std::{
 use wgpu::{Adapter, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType, ComputePipeline, ComputePipelineDescriptor, DeviceDescriptor, Features, Instance, InstanceDescriptor, Limits, PipelineLayoutDescriptor, PowerPreference, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages};
 
 use super::{
-	AdapterSelector, GpuAdapterInfo, GpuConfig, GpuDeviceStats, GpuDevices, GpuInfo, GpuPoolStats, run::{self, Pool}, shader
+	AdapterSelector, GpuAdapterInfo, GpuConfig, GpuDeviceStats, GpuDevices, GpuInfo, GpuMemoryReport, GpuPoolStats, run::{self, Pool}, shader
 };
 use crate::{Error, Precision, Result};
 
@@ -71,6 +71,16 @@ impl Context {
 
 	pub fn stats(&self) -> GpuDeviceStats {
 		GpuDeviceStats { info: self.info.clone(), pool: self.pool_stats(), calls: self.calls.load(Ordering::Relaxed), chunks: self.chunks.load(Ordering::Relaxed), in_flight: self.in_flight.load(Ordering::Relaxed), lost: self.is_lost() }
+	}
+
+	pub fn memory_report(&self) -> Option<GpuMemoryReport> {
+		if self.lost.load(Ordering::Acquire) {
+			return None;
+		}
+		// Frees what completed submissions no longer need; never waits. A failure here
+		// (e.g. a lost device) leaves the report as it is.
+		let _ = self.device.poll(wgpu::PollType::Poll);
+		self.device.generate_allocator_report().map(|r| GpuMemoryReport { allocated_bytes: r.total_allocated_bytes, reserved_bytes: r.total_reserved_bytes, allocations: r.allocations.len(), blocks: r.blocks.len() })
 	}
 }
 

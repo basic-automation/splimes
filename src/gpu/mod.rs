@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-pub use config::{AdapterSelector, GpuAdapterInfo, GpuConfig, GpuDeviceStats, GpuDevices, GpuInfo, GpuPoolStats};
+pub use config::{AdapterSelector, GpuAdapterInfo, GpuConfig, GpuDeviceStats, GpuDevices, GpuInfo, GpuMemoryReport, GpuPoolStats};
 
 use crate::{Error, Precision, Result, kernel::Method, prepare::Knots, time::Grid, value::Value};
 
@@ -137,6 +137,29 @@ pub fn gpu_adapters() -> Vec<GpuAdapterInfo> {
 	return context::adapters();
 	#[cfg(not(feature = "gpu"))]
 	Vec::new()
+}
+
+/// The GPU devices' allocated memory (summed over every open device), if the GPU has started successfully and its backend
+/// can report it. Never blocks or starts the GPU.
+///
+/// Unlike [`gpu_pool_stats`], which counts only the buffer pool's idle sets, this is the
+/// device's own allocator: every live buffer, pooled or not. Use it to check that memory
+/// returns to a steady level between calls, or falls when the pool evicts.
+///
+/// It first lets wgpu free the buffers of work that has already finished (a non-blocking
+/// poll), so a buffer dropped by a completed call is not counted.
+///
+/// `None` when the GPU hasn't started, the crate was built without the `gpu` feature, or
+/// the backend has no allocator report: wgpu 30 reports on Vulkan and DX12, not on Metal
+/// or OpenGL. Memory the driver allocates outside wgpu's allocator is never included.
+#[must_use]
+// Not `const`: whether a public fn is const mustn't depend on a feature.
+#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
+pub fn gpu_memory_report() -> Option<GpuMemoryReport> {
+	#[cfg(feature = "gpu")]
+	return context::try_get().and_then(|devices| devices.list.iter().filter_map(context::Context::memory_report).reduce(|a, b| GpuMemoryReport { allocated_bytes: a.allocated_bytes + b.allocated_bytes, reserved_bytes: a.reserved_bytes + b.reserved_bytes, allocations: a.allocations + b.allocations, blocks: a.blocks + b.blocks }));
+	#[cfg(not(feature = "gpu"))]
+	None
 }
 
 /// Whether anything has begun opening the GPU device: it may still be opening, or have
