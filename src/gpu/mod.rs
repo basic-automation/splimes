@@ -10,8 +10,6 @@ mod config;
 #[cfg(feature = "gpu")]
 mod context;
 #[cfg(feature = "gpu")]
-pub mod pending;
-#[cfg(feature = "gpu")]
 pub mod run;
 #[cfg(feature = "gpu")]
 mod shader;
@@ -147,16 +145,6 @@ pub fn eval<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precis
 	return run::eval(context::get()?, knots, grid, method, precision, out);
 	#[cfg(not(feature = "gpu"))]
 	Err(no_gpu_feature())
-}
-
-/// Starts `knots` on the GPU without waiting for it, opening the device first if need be;
-/// see [`pending`]. On failure, `out` comes back with the error.
-#[cfg(feature = "gpu")]
-pub fn start<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, out: Vec<f64>) -> std::result::Result<std::sync::Arc<pending::Job>, (Error, Vec<f64>)> {
-	match context::get() {
-		Ok(ctx) => pending::start(ctx, knots, grid, method, precision, out),
-		Err(e) => Err((e, out)),
-	}
 }
 
 /// Whether the GPU is open and can run `precision`. Never blocks and never opens it:

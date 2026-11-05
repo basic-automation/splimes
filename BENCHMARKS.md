@@ -230,6 +230,59 @@ an idle machine, before and after 1.1.0.
 | 60 | 19 µs |
 | 1,440 | 184 µs |
 
+## Overlapping requests
+
+Non-blocking GPU handles were dropped before 1.0 and re-added for 1.3 to check that
+decision: `submit_f64` returned a `GpuHandle` at once, one shared poller thread completed
+every in-flight dispatch with non-blocking polls, and no thread blocked in the driver while
+the GPU worked. It was measured against the existing `spawn_f64` (a rayon worker blocks in
+the driver's wait) and dropped again. The harness stays as `examples/handles.rs`, now with
+the `run` and `spawn` modes only.
+
+Measured 2026-11-04 at commit `dec0840` (branch `p5/async-gpu-handles`): splimes 1.2.0
+plus the handle API, rustc 1.100.0-nightly (2026-09-22), wgpu 30.0.1, rayon 1.12.0 (16
+threads), RTX 4070 Ti SUPER on driver 615.78.08 (Vulkan, `f64` kernels), Ryzen 9 7950X3D
+(16 cores). **The machine was not quiet**: the 1-minute load average stayed between 39
+and 67 through a 20-minute wait beforehand and was 29–42 during the runs, so every figure
+is pessimistic and noisy. Workload: 512 requests, each 2 ms of CPU work on the calling
+thread (standing in for parsing the next request) followed by a Cubic interpolation of
+4,096 irregular knots onto 1,048,576 millisecond points on the GPU; `spawn` and `submit`
+keep up to 8 requests in flight.
+
+```bash
+cargo run --release --example handles -- --requests 512 --points 1048576 --parse-us 2000 --depth 8
+```
+
+Wall time per mode, five runs in the order `run, spawn, submit`, then one run in the
+reverse order:
+
+| Run | `run` | `spawn` | `submit` | `submit` / `spawn` |
+|---|---:|---:|---:|---:|
+| 1 | 9,619 ms | 9,966 ms | 7,209 ms | 0.72 |
+| 2 | 6,029 ms | 4,017 ms | 4,116 ms | 1.02 |
+| 3 | 5,158 ms | 4,036 ms | 4,100 ms | 1.02 |
+| 4 | 5,444 ms | 3,599 ms | 3,248 ms | 0.90 |
+| 5 | 5,025 ms | 3,893 ms | 4,012 ms | 1.03 |
+| reversed | 4,713 ms | 2,276 ms | 2,923 ms | 1.28 |
+
+Median of runs 2–5 (run 1 paid a load spike and first-use costs in every mode):
+`run` 5,301 ms, `spawn` 3,955 ms, `submit` 4,056 ms. The caller's time inside the call
+was 1–3 ms in total for `spawn` and 0.6–2.3 s for `submit` (which prepared and uploaded
+each request on the caller's thread); its time waiting for results was 1.2–3.8 s for
+`submit` and 1.2–8.5 s for `spawn`. All three modes produced bit-identical results.
+
+What it shows:
+
+- Overlapping CPU work with the GPU is worth about 1.3× here over blocking on each call,
+  and `spawn_f64`, already in 1.x, delivers it.
+- `submit` was not reproducibly faster than `spawn`: from 0.72× to 1.28× of its wall
+  time across runs, about 1.0 at the median, with the order of the modes moving the
+  result more than the mode did.
+- Its one structural benefit, no thread blocked per in-flight request, costs a rayon
+  worker per in-flight request with `spawn`, which at depth 8 on 16 threads did not show
+  up in throughput. Dropped again; revisit only for a server holding far more in-flight
+  GPU requests than it has threads.
+
 ## Conformance
 
 The worst error measured by `tests/contract.rs` against an exact 60-digit reference, in

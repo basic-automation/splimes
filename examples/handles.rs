@@ -1,11 +1,12 @@
-//! Requests that interleave CPU work with GPU interpolation, three ways: `run` (the caller
-//! blocks on each), `spawn` (a rayon worker blocks on each) and `submit` (nothing blocks;
-//! the GPU poller completes them).
+//! Requests that interleave CPU work with GPU interpolation, two ways: `run` (the caller
+//! blocks on each) and `spawn` (a rayon worker blocks on each). A third mode, `submit`
+//! (non-blocking GPU handles completed by one poller thread), was measured for 1.3 and
+//! dropped: see "Overlapping requests" in BENCHMARKS.md.
 //!
 //! Each request first does `--parse-us` microseconds of CPU work on the calling thread
 //! (standing in for parsing or reading the next request's input), then interpolates a
-//! `--knots`-knot series onto a `--points`-point grid on the GPU. `spawn` and `submit`
-//! keep up to `--depth` requests in flight, resolving the oldest when full.
+//! `--knots`-knot series onto a `--points`-point grid on the GPU. `spawn`
+//! keeps up to `--depth` requests in flight, resolving the oldest when full.
 //!
 //! ```text
 //! cargo run --release --example handles -- --smoke
@@ -13,11 +14,8 @@
 //! ```
 //!
 //! Reported per mode: wall time, requests per second, the caller's time inside splimes
-//! calls (`run`, `spawn`, `submit`) and waiting for results, and the threads each request
-//! occupies while the GPU computes, which follows from how each mode works rather than
-//! from a measurement: `run` blocks the caller, `spawn` a rayon worker (blocked in the
-//! driver's wait), `submit` none (one poller thread serves every request, sleeping
-//! between non-blocking polls).
+//! calls (`run`, `spawn`) and waiting for results, and the thread each request occupies
+//! while the GPU computes: `run` blocks the caller, `spawn` a rayon worker.
 
 use std::{
 	collections::VecDeque, future::Future, hint::black_box, pin::Pin, sync::Arc, task::{Context, Poll, Wake, Waker}, thread::{self, Thread}, time::{Duration, Instant}
@@ -37,7 +35,7 @@ struct Args {
 }
 
 fn args() -> Args {
-	let mut a = Args { requests: 256, points: 1 << 20, knots: 4096, parse_us: 2_000, depth: 8, precision: Precision::F64, modes: vec!["run".into(), "spawn".into(), "submit".into()] };
+	let mut a = Args { requests: 256, points: 1 << 20, knots: 4096, parse_us: 2_000, depth: 8, precision: Precision::F64, modes: vec!["run".into(), "spawn".into()] };
 	let mut it = std::env::args().skip(1);
 	while let Some(flag) = it.next() {
 		let mut value = || it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
@@ -105,7 +103,7 @@ fn block_on<F: Future + Unpin>(mut f: F) -> F::Output {
 #[derive(Default)]
 struct Totals {
 	wall: Duration,
-	/// The caller's time inside `run`, `spawn` or `submit`.
+	/// The caller's time inside `run` or `spawn`.
 	calling: Duration,
 	/// The caller's time waiting for a result.
 	waiting: Duration,
@@ -137,7 +135,6 @@ fn main() {
 	let (ts, vs, start, end) = &inputs[0];
 	let reference = interpolator.run_f64(ts, vs, *start, *end).expect("runs");
 	assert_eq!(block_on(interpolator.spawn_f64(ts.clone(), vs.clone(), *start, *end)).expect("runs"), reference, "spawn differs from run");
-	assert_eq!(interpolator.submit_f64(ts.clone(), vs.clone(), *start, *end).wait().expect("runs"), reference, "submit differs from run");
 
 	println!("mode,requests,wall_ms,requests_per_s,caller_calling_ms,caller_waiting_ms,threads_blocked_per_in_flight_request,points,checksum");
 	for mode in &a.modes {
@@ -177,37 +174,11 @@ fn main() {
 					tally(&mut t, &out);
 				}
 			}
-			"submit" => {
-				let mut queue = VecDeque::new();
-				for r in 0..a.requests {
-					sink ^= parse(a.parse_us, r);
-					if queue.len() >= a.depth {
-						let at = Instant::now();
-						let out = queue.pop_front().map(splimes::GpuHandle::wait).expect("full").expect("runs");
-						t.waiting += at.elapsed();
-						tally(&mut t, &out);
-					}
-					let (ts, vs, start, end) = inputs[r % inputs.len()].clone();
-					let at = Instant::now();
-					queue.push_back(interpolator.submit_f64(ts, vs, start, end));
-					t.calling += at.elapsed();
-				}
-				for h in queue {
-					let at = Instant::now();
-					let out = h.wait().expect("runs");
-					t.waiting += at.elapsed();
-					tally(&mut t, &out);
-				}
-			}
 			other => panic!("unknown mode {other}"),
 		}
 		t.wall = begin.elapsed();
 		black_box(sink);
-		let blocked = match mode.as_str() {
-			"run" => "1 (the caller)",
-			"spawn" => "1 (a rayon worker)",
-			_ => "0 (one shared poller)",
-		};
+		let blocked = if mode == "run" { "1 (the caller)" } else { "1 (a rayon worker)" };
 		println!("{mode},{},{:.1},{:.1},{:.1},{:.1},{blocked},{},{:.6e}", a.requests, t.wall.as_secs_f64() * 1e3, a.requests as f64 / t.wall.as_secs_f64(), t.calling.as_secs_f64() * 1e3, t.waiting.as_secs_f64() * 1e3, t.points, t.checksum);
 	}
 }
