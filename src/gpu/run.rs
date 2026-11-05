@@ -7,7 +7,7 @@ use std::{
 use rayon::prelude::*;
 use wgpu::{BindGroupDescriptor, BindGroupEntry, Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ErrorFilter, MapMode, PollType};
 
-use super::{BatchJob, GpuPoolStats, context::Context};
+use super::{GpuPoolStats, context::Context};
 use crate::{Error, Precision, Result, kernel::Method, prepare::Knots, time::Grid, value::Value};
 
 const WORKGROUP: u32 = 256;
@@ -72,16 +72,28 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 	let time_bytes: u64 = 12;
 	let pair_len: usize = 12;
 	let n = knots.len();
-	let n_u32 = knot_count(ctx, n)?;
+	if n as u64 * time_bytes > ctx.max_binding_bytes {
+		return Err(Error::Gpu(format!("{n} knots exceed {}'s storage-binding limit of {} bytes", ctx.info.name, ctx.max_binding_bytes)));
+	}
+	let n_u32 = u32::try_from(n).map_err(|_| Error::Gpu(format!("{n} knots exceed the GPU kernel's u32 indexing")))?;
 
 	let mut knot_u = Vec::with_capacity(n * pair_len);
 	times(knots.offsets.iter().copied(), &mut knot_u);
-	let mut knot_y = Vec::with_capacity(n * 8);
-	knot_values(knots, precision, &mut knot_y);
+	let knot_y: Vec<u8> = match precision {
+		Precision::F64 => bytemuck::cast_slice(&knots.y).to_vec(),
+		#[allow(clippy::cast_possible_truncation)] // Single precision is what was asked for.
+		Precision::F32 => bytemuck::cast_slice(&knots.y.iter().map(|&v| v as f32).collect::<Vec<f32>>()).to_vec(),
+	};
 	let knot_u = upload(ctx, "splimes knot times", &knot_u);
 	let knot_y = upload(ctx, "splimes knot values", &knot_y);
 
-	let chunk = chunk_points(ctx);
+	#[allow(clippy::cast_possible_truncation)] // Bounded by MAX_CHUNK.
+	let chunk = u64::from(ctx.config.chunk_points.max(1)).min(MAX_CHUNK).min(ctx.max_binding_bytes / time_bytes) as usize;
+	// Times are nanoseconds in both kernels, scaled by 1/h.
+	let inv_h = 1.0 / knots.h;
+	let (lo, hi) = method.bounds.unwrap_or((0.0, 0.0));
+	#[allow(clippy::cast_possible_truncation)] // `len <= MAX_CHUNK`, which fits u32.
+	let header = |len: usize| [n_u32, method.window as u32, u32::from(method.hold), u32::from(method.bounds.is_some()), len as u32, 0, 0, 0];
 
 	let mut pending: VecDeque<(Slot, usize, usize, wgpu::SubmissionIndex)> = VecDeque::with_capacity(IN_FLIGHT);
 	// Buffer sets whose chunk has been read back, ready for the next chunk: a call holds at
@@ -90,10 +102,14 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 	let mut first = 0;
 	while first < grid.len {
 		let len = chunk.min(grid.len - first);
-		let slot = finished.iter().position(|s| s.capacity >= len).map_or_else(|| acquire(ctx, precision, len, PARAMS_BYTES), |i| finished.swap_remove(i));
+		let slot = finished.iter().position(|s| s.capacity >= len).map_or_else(|| acquire(ctx, precision, len), |i| finished.swap_remove(i));
 
-		let mut params = Vec::with_capacity(64);
-		params_record(knots, method, precision, n_u32, len, &mut params);
+		let mut params = bytemuck::cast_slice(&header(len)).to_vec();
+		match precision {
+			Precision::F64 => params.extend_from_slice(bytemuck::cast_slice(&[inv_h, lo, hi, 0.0])),
+			#[allow(clippy::cast_possible_truncation)]
+			Precision::F32 => params.extend_from_slice(bytemuck::cast_slice(&[inv_h as f32, lo as f32, hi as f32, 0.0])),
+		}
 		ctx.queue.write_buffer(&slot.params, 0, &params);
 
 		// Grid times, exact on the host, written in parallel straight into the queue's
@@ -117,7 +133,7 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 		drop(staging);
 
 		let bytes = len as u64 * elem;
-		let entries = [BindGroupEntry { binding: 0, resource: knot_u.as_entire_binding() }, BindGroupEntry { binding: 1, resource: knot_y.as_entire_binding() }, sized(2, &slot.out, bytes), sized(3, &slot.params, PARAMS_BYTES), sized(4, &slot.grid, len as u64 * time_bytes)];
+		let entries = [BindGroupEntry { binding: 0, resource: knot_u.as_entire_binding() }, BindGroupEntry { binding: 1, resource: knot_y.as_entire_binding() }, sized(2, &slot.out, bytes), BindGroupEntry { binding: 3, resource: slot.params.as_entire_binding() }, sized(4, &slot.grid, len as u64 * time_bytes)];
 		let bind_group = ctx.device.create_bind_group(&BindGroupDescriptor { label: Some("splimes"), layout: &kernel.layout, entries: &entries });
 		let mut encoder = ctx.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("splimes") });
 		{
@@ -143,48 +159,6 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 	Ok(finished)
 }
 
-/// Grid points per dispatch: the configured chunk, clamped to what one dispatch and one
-/// storage binding allow.
-fn chunk_points(ctx: &Context) -> usize {
-	#[allow(clippy::cast_possible_truncation)] // Bounded by MAX_CHUNK.
-	let chunk = u64::from(ctx.config.chunk_points.max(1)).min(MAX_CHUNK).min(ctx.max_binding_bytes / 12) as usize;
-	chunk
-}
-
-/// Appends the kernel's `Params` for `len` grid points of this series: the WGSL struct's
-/// layout, 48 bytes in `f32` and 64 in `f64`.
-fn params_record<V: Value>(knots: &Knots<'_, V>, method: &Method, precision: Precision, n: u32, len: usize, out: &mut Vec<u8>) {
-	// Times are nanoseconds in both kernels, scaled by 1/h.
-	let inv_h = 1.0 / knots.h;
-	let (lo, hi) = method.bounds.unwrap_or((0.0, 0.0));
-	#[allow(clippy::cast_possible_truncation)] // `len <= MAX_CHUNK`, which fits u32.
-	let header = [n, method.window as u32, u32::from(method.hold), u32::from(method.bounds.is_some()), len as u32, 0, 0, 0];
-	out.extend_from_slice(bytemuck::cast_slice(&header));
-	match precision {
-		Precision::F64 => out.extend_from_slice(bytemuck::cast_slice(&[inv_h, lo, hi, 0.0])),
-		#[allow(clippy::cast_possible_truncation)] // Single precision is what was asked for.
-		Precision::F32 => out.extend_from_slice(bytemuck::cast_slice(&[inv_h as f32, lo as f32, hi as f32, 0.0])),
-	}
-}
-
-/// Appends the normalised knot values in the kernel's precision.
-fn knot_values<V: Value>(knots: &Knots<'_, V>, precision: Precision, out: &mut Vec<u8>) {
-	match precision {
-		Precision::F64 => out.extend_from_slice(bytemuck::cast_slice(&knots.y)),
-		#[allow(clippy::cast_possible_truncation)] // Single precision is what was asked for.
-		Precision::F32 => out.extend(knots.y.iter().flat_map(|&v| (v as f32).to_ne_bytes())),
-	}
-}
-
-/// The refusal [`dispatch`] gives for knots the device can't bind, if any, and the knot
-/// count as the kernel's `u32`.
-fn knot_count(ctx: &Context, n: usize) -> Result<u32> {
-	if n as u64 * 12 > ctx.max_binding_bytes {
-		return Err(Error::Gpu(format!("{n} knots exceed {}'s storage-binding limit of {} bytes", ctx.info.name, ctx.max_binding_bytes)));
-	}
-	u32::try_from(n).map_err(|_| Error::Gpu(format!("{n} knots exceed the GPU kernel's u32 indexing")))
-}
-
 /// A storage buffer holding `bytes`, created unmapped and filled through the queue, so an
 /// allocation failure is reported to the error scopes like any other. (`create_buffer_init`
 /// maps at creation and panics if the allocation failed.) `bytes` is a whole number of
@@ -198,12 +172,7 @@ fn upload(ctx: &Context, label: &'static str, bytes: &[u8]) -> Buffer {
 /// A binding of the first `size` bytes of a pooled buffer, which may be larger: the
 /// kernel sizes its loops by `params`, but out-of-range writes must still be impossible.
 const fn sized(binding: u32, buffer: &Buffer, size: u64) -> BindGroupEntry<'_> {
-	at(binding, buffer, 0, size)
-}
-
-/// A binding of `size` bytes of `buffer` from byte `offset`.
-const fn at(binding: u32, buffer: &Buffer, offset: u64, size: u64) -> BindGroupEntry<'_> {
-	BindGroupEntry { binding, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer, offset, size: std::num::NonZeroU64::new(size) }) }
+	BindGroupEntry { binding, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer, offset: 0, size: std::num::NonZeroU64::new(size) }) }
 }
 
 /// Waits for one chunk, copies its results into `out`, and hands back its buffer set.
@@ -245,280 +214,6 @@ fn read_back(ctx: &Context, (slot, first, len, submission): (Slot, usize, usize,
 	Ok(slot)
 }
 
-/// Series one batched submission holds at most: bounds its parameter buffer (one aligned
-/// record per series, 1 MiB at the usual 256-byte alignment) and its bind groups.
-const MAX_BATCH_SERIES: usize = 4096;
-
-/// Runs many series with as few submissions as the device allows.
-///
-/// Every series whose grid fits in one chunk is packed with others, in order, into one
-/// command encoder — one dispatch and bind group per series, sharing one set of buffers at
-/// aligned offsets — one queue submission and one read-back mapping, up to a chunk of grid
-/// points, [`MAX_BATCH_SERIES`] series or a storage binding of knots per submission. Two
-/// submissions are in flight at once, as for the chunks of one call. A series whose grid
-/// is larger than a chunk runs alone, through [`eval`].
-///
-/// The kernel, its inputs and its parameters are exactly those of [`eval`] on the same
-/// series, so every result is bit-identical to a call of its own. Results are per series:
-/// a refused series (too many knots) doesn't affect the others, but a device error fails
-/// every series packed into the same submissions.
-pub fn eval_batch<V: Value>(ctx: &Context, jobs: &[BatchJob<'_, '_, V>], precision: Precision, outs: &mut [&mut [f64]]) -> Vec<Result<()>> {
-	#[cfg(test)]
-	if tests::FAIL.get() {
-		return vec![Err(Error::Gpu("injected failure".to_owned())); jobs.len()];
-	}
-	let kernel = match ctx.kernel(precision) {
-		Ok(kernel) => kernel,
-		Err(e) => return vec![Err(e); jobs.len()],
-	};
-	let chunk = chunk_points(ctx);
-	let mut results: Vec<Result<()>> = vec![Ok(()); jobs.len()];
-	let mut packed = Vec::with_capacity(jobs.len());
-	let mut alone = Vec::new();
-	for (i, job) in jobs.iter().enumerate() {
-		match knot_count(ctx, job.knots.len()) {
-			Err(e) => results[i] = Err(e),
-			Ok(_) if job.grid.len > chunk => alone.push(i),
-			Ok(n) => packed.push((i, n)),
-		}
-	}
-	let layout = Layout::new(ctx, precision);
-	let groups = layout.plan(jobs, &packed, chunk, ctx.max_binding_bytes);
-	if !groups.is_empty() {
-		match captured(&ctx.device, || submit_groups(ctx, kernel, &layout, jobs, &groups, precision, outs)) {
-			Ok(finished) => release(ctx, finished),
-			Err(e) => {
-				for piece in groups.iter().flat_map(|g| &g.pieces) {
-					results[piece.job] = Err(e.clone());
-				}
-			}
-		}
-	}
-	for i in alone {
-		results[i] = eval(ctx, jobs[i].knots, jobs[i].grid, jobs[i].method, precision, outs[i]);
-	}
-	results
-}
-
-/// Offset alignments of one batched submission's shared buffers.
-struct Layout {
-	/// Grid points each series' output and grid times start on a multiple of.
-	points: usize,
-	/// Bytes each series' knot times and values start on a multiple of.
-	storage: u64,
-	/// Bytes between parameter records.
-	uniform: u64,
-}
-
-/// One series' place in a batched submission.
-struct Piece {
-	job: usize,
-	/// Knots, as the kernel's `u32`.
-	n: u32,
-	/// Byte offsets of its knot times and values.
-	knot_times: u64,
-	knot_values: u64,
-	/// Its first grid point in the shared output and grid-time buffers.
-	first: usize,
-	len: usize,
-}
-
-/// The series of one submission, and the extent of its shared buffers.
-struct Group {
-	pieces: Vec<Piece>,
-	/// Grid points up to the end of the last series.
-	points: usize,
-	knot_time_bytes: u64,
-	knot_value_bytes: u64,
-}
-
-const fn align_up(x: u64, to: u64) -> u64 {
-	x.div_ceil(to) * to
-}
-
-const fn gcd(a: u64, b: u64) -> u64 {
-	if b == 0 { a } else { gcd(b, a % b) }
-}
-
-impl Layout {
-	fn new(ctx: &Context, precision: Precision) -> Self {
-		let limits = ctx.device.limits();
-		let storage = u64::from(limits.min_storage_buffer_offset_alignment.max(4));
-		// The fewest points whose grid times (12 bytes each) and outputs both span a whole
-		// number of alignments.
-		let times = storage / gcd(storage, 12);
-		let values = storage / gcd(storage, precision_bytes(precision));
-		#[allow(clippy::cast_possible_truncation)] // At most an alignment, a few hundred.
-		let points = (times / gcd(times, values) * values) as usize;
-		Self { points, storage, uniform: align_up(PARAMS_BYTES, u64::from(limits.min_uniform_buffer_offset_alignment.max(4))) }
-	}
-
-	/// Packs `packed` (series index, knot count), in order, into submissions.
-	fn plan<V: Value>(&self, jobs: &[BatchJob<'_, '_, V>], packed: &[(usize, u32)], chunk: usize, max_binding_bytes: u64) -> Vec<Group> {
-		let mut groups: Vec<Group> = Vec::new();
-		let mut current = Group { pieces: Vec::new(), points: 0, knot_time_bytes: 0, knot_value_bytes: 0 };
-		for &(job, n) in packed {
-			let len = jobs[job].grid.len;
-			let first = self.align_points(current.points);
-			let knot_times = align_up(current.knot_time_bytes, self.storage);
-			let knot_values = align_up(current.knot_value_bytes, self.storage);
-			let time_bytes = u64::from(n) * 12;
-			let full = first + len > chunk || current.pieces.len() >= MAX_BATCH_SERIES || knot_times + time_bytes > max_binding_bytes;
-			if full && !current.pieces.is_empty() {
-				groups.push(std::mem::replace(&mut current, Group { pieces: Vec::new(), points: 0, knot_time_bytes: 0, knot_value_bytes: 0 }));
-				current.pieces.push(Piece { job, n, knot_times: 0, knot_values: 0, first: 0, len });
-				current.points = len;
-				current.knot_time_bytes = time_bytes;
-				current.knot_value_bytes = u64::from(n) * 8;
-				continue;
-			}
-			current.pieces.push(Piece { job, n, knot_times, knot_values, first, len });
-			current.points = first + len;
-			current.knot_time_bytes = knot_times + time_bytes;
-			current.knot_value_bytes = knot_values + u64::from(n) * 8;
-		}
-		if !current.pieces.is_empty() {
-			groups.push(current);
-		}
-		groups
-	}
-
-	const fn align_points(&self, points: usize) -> usize {
-		points.div_ceil(self.points) * self.points
-	}
-}
-
-/// Encodes, submits and reads back every group, two in flight at once, and returns the
-/// buffer sets for the pool.
-fn submit_groups<V: Value>(ctx: &Context, kernel: &super::context::Kernel, layout: &Layout, jobs: &[BatchJob<'_, '_, V>], groups: &[Group], precision: Precision, outs: &mut [&mut [f64]]) -> Result<Vec<Slot>> {
-	let elem = precision_bytes(precision);
-	let mut pending: VecDeque<(Slot, &Group, wgpu::SubmissionIndex)> = VecDeque::with_capacity(IN_FLIGHT);
-	let mut finished: Vec<Slot> = Vec::with_capacity(IN_FLIGHT);
-	for group in groups {
-		let params_bytes = group.pieces.len() as u64 * layout.uniform;
-		let slot = finished.iter().position(|s| s.capacity >= group.points && s.params_bytes >= params_bytes).map_or_else(|| acquire(ctx, precision, group.points, params_bytes), |i| finished.swap_remove(i));
-
-		// Knots, parameters and grid times, each series at its aligned offset.
-		#[allow(clippy::cast_possible_truncation)] // Bounded by the storage-binding limit.
-		let mut knot_t = Vec::with_capacity(group.knot_time_bytes as usize);
-		#[allow(clippy::cast_possible_truncation)]
-		let mut knot_y = Vec::with_capacity(group.knot_value_bytes as usize);
-		#[allow(clippy::cast_possible_truncation)] // At most MAX_BATCH_SERIES records.
-		let mut params = Vec::with_capacity(params_bytes as usize);
-		for (k, piece) in group.pieces.iter().enumerate() {
-			let job = &jobs[piece.job];
-			#[allow(clippy::cast_possible_truncation)]
-			{
-				knot_t.resize(piece.knot_times as usize, 0);
-				knot_y.resize(piece.knot_values as usize, 0);
-				params.resize(k * layout.uniform as usize, 0);
-			}
-			times(job.knots.offsets.iter().copied(), &mut knot_t);
-			knot_values(job.knots, precision, &mut knot_y);
-			params_record(job.knots, job.method, precision, piece.n, piece.len, &mut params);
-		}
-		let knot_t = upload(ctx, "splimes batch knot times", &knot_t);
-		let knot_y = upload(ctx, "splimes batch knot values", &knot_y);
-		ctx.queue.write_buffer(&slot.params, 0, &params);
-		let mut grid = vec![0_u8; group.points * 12];
-		{
-			// Disjoint regions, one per series, filled in parallel.
-			let mut regions = Vec::with_capacity(group.pieces.len());
-			let mut rest = grid.as_mut_slice();
-			let mut at = 0;
-			for piece in &group.pieces {
-				let (_, tail) = rest.split_at_mut((piece.first - at) * 12);
-				let (region, tail) = tail.split_at_mut(piece.len * 12);
-				regions.push((region, piece));
-				rest = tail;
-				at = piece.first + piece.len;
-			}
-			regions.into_par_iter().for_each(|(region, piece)| {
-				let job = &jobs[piece.job];
-				let mut bytes = Vec::with_capacity(region.len());
-				times(job.grid.offsets(job.knots.t0, 0).take(piece.len), &mut bytes);
-				region.copy_from_slice(&bytes);
-			});
-		}
-		ctx.queue.write_buffer(&slot.grid, 0, &grid);
-
-		let bind_groups: Vec<wgpu::BindGroup> = group
-			.pieces
-			.iter()
-			.enumerate()
-			.map(|(k, piece)| {
-				let entries = [at(0, &knot_t, piece.knot_times, u64::from(piece.n) * 12), at(1, &knot_y, piece.knot_values, u64::from(piece.n) * elem), at(2, &slot.out, piece.first as u64 * elem, piece.len as u64 * elem), at(3, &slot.params, k as u64 * layout.uniform, PARAMS_BYTES), at(4, &slot.grid, piece.first as u64 * 12, piece.len as u64 * 12)];
-				ctx.device.create_bind_group(&BindGroupDescriptor { label: Some("splimes batch"), layout: &kernel.layout, entries: &entries })
-			})
-			.collect();
-		let mut encoder = ctx.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("splimes batch") });
-		{
-			let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor { label: Some("splimes batch"), timestamp_writes: None });
-			pass.set_pipeline(&kernel.pipeline);
-			for (bind_group, piece) in bind_groups.iter().zip(&group.pieces) {
-				pass.set_bind_group(0, bind_group, &[]);
-				#[allow(clippy::cast_possible_truncation)] // At most a chunk.
-				pass.dispatch_workgroups((piece.len as u32).div_ceil(WORKGROUP), 1, 1);
-			}
-		}
-		encoder.copy_buffer_to_buffer(&slot.out, 0, &slot.staging, 0, group.points as u64 * elem);
-		let submission = ctx.queue.submit(Some(encoder.finish()));
-		pending.push_back((slot, group, submission));
-		if pending.len() >= IN_FLIGHT
-			&& let Some(job) = pending.pop_front()
-		{
-			finished.push(read_back_group(ctx, job, precision, outs)?);
-		}
-	}
-	while let Some(job) = pending.pop_front() {
-		finished.push(read_back_group(ctx, job, precision, outs)?);
-	}
-	Ok(finished)
-}
-
-/// Waits for one batched submission with a single mapping and copies each series'
-/// results into its own output.
-fn read_back_group(ctx: &Context, (slot, group, submission): (Slot, &Group, wgpu::SubmissionIndex), precision: Precision, outs: &mut [&mut [f64]]) -> Result<Slot> {
-	let elem = precision_bytes(precision);
-	let slice = slot.staging.slice(..group.points as u64 * elem);
-	let (tx, rx) = mpsc::channel();
-	slice.map_async(MapMode::Read, move |r| {
-		let _ = tx.send(r);
-	});
-	ctx.device.poll(PollType::Wait { submission_index: Some(submission), timeout: Some(CHUNK_TIMEOUT) }).map_err(|e| Error::Gpu(format!("waiting for the GPU: {e}")))?;
-	rx.recv().map_err(|_| Error::Gpu("buffer mapping was abandoned".to_owned()))?.map_err(|e| Error::Gpu(format!("mapping the result buffer: {e}")))?;
-	// As in `read_back`: a lost device can report a successful mapping of stale contents.
-	if ctx.lost.load(Ordering::Acquire) {
-		return Err(Error::GpuUnavailable("the GPU device was lost during the call".to_owned()));
-	}
-	{
-		let view = slice.get_mapped_range().map_err(|e| Error::Gpu(format!("reading the result buffer: {e}")))?;
-		// The group's series in index order, as packed, paired with their outputs.
-		let mut wanted = group.pieces.iter().map(|p| p.job).peekable();
-		let mut dests: Vec<&mut [f64]> = Vec::with_capacity(group.pieces.len());
-		for (i, out) in outs.iter_mut().enumerate() {
-			if wanted.peek() == Some(&i) {
-				dests.push(&mut **out);
-				wanted.next();
-			}
-		}
-		let copy = |(dest, piece): (&mut [f64], &Piece)| {
-			let dest = &mut dest[..piece.len];
-			match precision {
-				Precision::F64 => dest.copy_from_slice(&bytemuck::cast_slice::<u8, f64>(&view)[piece.first..piece.first + piece.len]),
-				Precision::F32 => {
-					for (d, &s) in dest.iter_mut().zip(&bytemuck::cast_slice::<u8, f32>(&view)[piece.first..piece.first + piece.len]) {
-						*d = f64::from(s);
-					}
-				}
-			}
-		};
-		dests.into_par_iter().zip(group.pieces.par_iter()).with_min_len(16).for_each(copy);
-	}
-	slot.staging.unmap();
-	Ok(slot)
-}
-
 const fn precision_bytes(precision: Precision) -> u64 {
 	match precision {
 		Precision::F64 => 8,
@@ -531,9 +226,6 @@ pub struct Slot {
 	precision: Precision,
 	/// Grid points this set can hold.
 	capacity: usize,
-	/// Bytes of the params buffer: [`PARAMS_BYTES`] for a call, one aligned record per
-	/// series for a batch.
-	params_bytes: u64,
 	out: Buffer,
 	staging: Buffer,
 	params: Buffer,
@@ -544,7 +236,7 @@ pub struct Slot {
 impl Slot {
 	const fn bytes(&self) -> u64 {
 		// Output and staging values, plus a 12-byte time per point, plus the params.
-		self.capacity as u64 * (2 * precision_bytes(self.precision) + 12) + self.params_bytes
+		self.capacity as u64 * (2 * precision_bytes(self.precision) + 12) + 64
 	}
 }
 
@@ -567,16 +259,11 @@ impl Pool {
 	}
 }
 
-/// Bytes of one call's kernel parameters (the WGSL `Params` struct, padded).
-const PARAMS_BYTES: u64 = 64;
-
-/// A buffer set for `len` grid points and `params_bytes` of parameters, from the pool if
-/// one fits.
-fn acquire(ctx: &Context, precision: Precision, len: usize, params_bytes: u64) -> Slot {
+fn acquire(ctx: &Context, precision: Precision, len: usize) -> Slot {
 	{
 		let mut pool = ctx.pool.lock().unwrap_or_else(PoisonError::into_inner);
 		// The smallest idle set that fits, so a small call doesn't take a huge set.
-		if let Some(i) = pool.idle.iter().enumerate().filter(|(_, s)| s.precision == precision && s.capacity >= len && s.params_bytes >= params_bytes).min_by_key(|(_, s)| (s.capacity, s.params_bytes)).map(|(i, _)| i) {
+		if let Some(i) = pool.idle.iter().enumerate().filter(|(_, s)| s.precision == precision && s.capacity >= len).min_by_key(|(_, s)| s.capacity).map(|(i, _)| i) {
 			pool.reused += 1;
 			return pool.idle.swap_remove(i);
 		}
@@ -584,10 +271,9 @@ fn acquire(ctx: &Context, precision: Precision, len: usize, params_bytes: u64) -
 	}
 	// Round up to a power of two so nearby sizes share sets.
 	let capacity = len.next_power_of_two();
-	let params_bytes = params_bytes.next_power_of_two();
 	let elem = precision_bytes(precision);
 	let buffer = |label, size, usage| ctx.device.create_buffer(&BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
-	Slot { precision, capacity, params_bytes, out: buffer("splimes output", capacity as u64 * elem, BufferUsages::STORAGE | BufferUsages::COPY_SRC), staging: buffer("splimes staging", capacity as u64 * elem, BufferUsages::MAP_READ | BufferUsages::COPY_DST), params: buffer("splimes params", params_bytes, BufferUsages::UNIFORM | BufferUsages::COPY_DST), grid: buffer("splimes grid", capacity as u64 * 12, BufferUsages::STORAGE | BufferUsages::COPY_DST) }
+	Slot { precision, capacity, out: buffer("splimes output", capacity as u64 * elem, BufferUsages::STORAGE | BufferUsages::COPY_SRC), staging: buffer("splimes staging", capacity as u64 * elem, BufferUsages::MAP_READ | BufferUsages::COPY_DST), params: buffer("splimes params", 64, BufferUsages::UNIFORM | BufferUsages::COPY_DST), grid: buffer("splimes grid", capacity as u64 * 12, BufferUsages::STORAGE | BufferUsages::COPY_DST) }
 }
 
 fn release(ctx: &Context, slots: Vec<Slot>) {

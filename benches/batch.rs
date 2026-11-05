@@ -1,5 +1,10 @@
-//! Command batching: many independent series through one `run_f64_batch` call against
-//! the same series through one `run_f64` call each.
+//! Many independent series: one `run_f64` call after another against the same calls spread
+//! across series with rayon (`across`).
+//!
+//! This is the harness that measured GPU command batching (`run_f64_batch`, one GPU
+//! submission for many series) before it was dropped again; see BENCHMARKS.md, "Many
+//! series". Batching beat one GPU call per series but never the CPU spread across series,
+//! which is what this bench now compares.
 //!
 //! ```text
 //! cargo bench --bench batch                        # everything
@@ -17,6 +22,7 @@ use std::hint::black_box;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use rayon::prelude::*;
 use splimes::{Backend, Interpolator, Precision, Resolution, Spline};
 
 struct Series {
@@ -66,13 +72,7 @@ fn batch(c: &mut Criterion) {
 			let size = format!("{count}x{points}");
 			for &(name, backend, precision) in &configs {
 				let interpolator = Interpolator::new(Spline::Cubic, Resolution::Milliseconds).backend(backend).gpu_precision(precision);
-				group.bench_with_input(BenchmarkId::new(format!("{name}/batched"), &size), &jobs, |b, jobs| {
-					b.iter(|| {
-						let out = interpolator.run_f64_batch(jobs);
-						assert!(out.iter().all(Result::is_ok));
-						black_box(out)
-					});
-				});
+				group.bench_with_input(BenchmarkId::new(format!("{name}/across"), &size), &jobs, |b, jobs| b.iter(|| black_box(jobs.par_iter().map(|&(t, v, s, e)| interpolator.run_f64(t, v, s, e).expect("runs")).collect::<Vec<_>>())));
 				group.bench_with_input(BenchmarkId::new(format!("{name}/per-call"), &size), &jobs, |b, jobs| b.iter(|| black_box(jobs.iter().map(|&(t, v, s, e)| interpolator.run_f64(t, v, s, e).expect("runs")).collect::<Vec<_>>())));
 			}
 		}

@@ -230,6 +230,60 @@ an idle machine, before and after 1.1.0.
 | 60 | 19 µs |
 | 1,440 | 184 µs |
 
+## Many series
+
+Command batching was dropped before 1.0 and re-added for 1.3 to check that decision on a
+many-series workload: `run_f64_batch` packed every series into one command encoder, one
+queue submission and one read-back on the GPU (and spread the series across rayon's pool
+on `Parallel`). It was measured and dropped again. The harness stays as
+`benches/batch.rs`, now comparing one call per series against the same calls spread
+across series with rayon (`across`), which is the CPU result below without any new API.
+
+Measured 2026-11-04 at commit `489fe60` (branch `p5/command-batching`): splimes 1.2.0 plus
+the batch API, rustc 1.100.0-nightly (2026-09-22), wgpu 30.0.1, rayon 1.12.0, criterion
+0.8.2, RTX 4070 Ti SUPER on driver 615.78.08 (Vulkan), Ryzen 9 7950X3D (16 cores).
+**The machine was not quiet**: the 1-minute load average was 28–53 throughout (it never
+fell below 13 in a 20-minute wait beforehand), so CPU and GPU figures are both
+pessimistic. Each case is `series` series of `points` millisecond grid points over
+`points / 4` irregular knots, Cubic, `f64` out; three full runs, criterion medians, the
+cell is the median of the three and `±` half the range across runs as a percentage of it.
+Cases over 2²⁴ points in total were skipped (`SPLIMES_BATCH_MAX_POINTS`).
+
+| Series × points | `cpu` batched | `cpu` per-call | `parallel` batched | `parallel` per-call | `gpu-f64` batched | `gpu-f64` per-call | `gpu-f32` batched | `gpu-f32` per-call |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 × 64 | 2 µs (±5%) | 2 µs (±3%) | 2 µs (±4%) | 2 µs (±1%) | 300 µs (±21%) | 243 µs (±21%) | 281 µs (±9%) | 266 µs (±6%) |
+| 1 × 1024 | 25 µs (±3%) | 25 µs (±5%) | 27 µs (±3%) | 26 µs (±3%) | 301 µs (±6%) | 335 µs (±4%) | 316 µs (±7%) | 299 µs (±0%) |
+| 1 × 8192 | 192 µs (±0%) | 192 µs (±1%) | 206 µs (±2%) | 203 µs (±3%) | 563 µs (±9%) | 571 µs (±4%) | 524 µs (±90%) | 470 µs (±17%) |
+| 1 × 65536 | 1.54 ms (±0%) | 1.53 ms (±1%) | 1.27 ms (±4%) | 1.25 ms (±12%) | 2.73 ms (±23%) | 2.53 ms (±17%) | 2.10 ms (±9%) | 2.07 ms (±3%) |
+| 16 × 64 | 26 µs (±1%) | 26 µs (±12%) | 24 µs (±18%) | 29 µs (±3%) | 482 µs (±4%) | 3.55 ms (±4%) | 466 µs (±5%) | 3.47 ms (±3%) |
+| 16 × 1024 | 396 µs (±2%) | 398 µs (±2%) | 126 µs (±7%) | 421 µs (±13%) | 939 µs (±0%) | 4.64 ms (±1%) | 886 µs (±6%) | 4.81 ms (±13%) |
+| 16 × 8192 | 3.16 ms (±5%) | 3.14 ms (±2%) | 660 µs (±9%) | 3.26 ms (±1%) | 4.45 ms (±8%) | 9.12 ms (±15%) | 4.44 ms (±20%) | 8.68 ms (±60%) |
+| 16 × 65536 | 33.48 ms (±21%) | 33.20 ms (±12%) | 7.14 ms (±3%) | 21.37 ms (±14%) | 34.08 ms (±5%) | 36.42 ms (±9%) | 24.72 ms (±3%) | 31.95 ms (±11%) |
+| 256 × 64 | 428 µs (±1%) | 427 µs (±1%) | 196 µs (±11%) | 463 µs (±1%) | 3.38 ms (±1%) | 54.40 ms (±10%) | 2.60 ms (±23%) | 56.26 ms (±29%) |
+| 256 × 1024 | 6.39 ms (±2%) | 6.31 ms (±2%) | 927 µs (±4%) | 6.66 ms (±1%) | 6.85 ms (±16%) | 79.15 ms (±69%) | 7.52 ms (±15%) | 64.25 ms (±23%) |
+| 256 × 8192 | 71.62 ms (±7%) | 68.31 ms (±3%) | 6.05 ms (±47%) | 71.66 ms (±4%) | 34.20 ms (±2%) | 144.31 ms (±11%) | 21.95 ms (±29%) | 152.13 ms (±6%) |
+| 256 × 65536 | 555.11 ms (±4%) | 561.28 ms (±3%) | 60.25 ms (±6%) | 369.23 ms (±8%) | 246.08 ms (±18%) | 636.07 ms (±81%) | 242.97 ms (±57%) | 614.40 ms (±59%) |
+| 4096 × 64 | 7.27 ms (±12%) | 7.00 ms (±7%) | 2.25 ms (±14%) | 8.16 ms (±4%) | 50.69 ms (±1%) | 1127.96 ms (±11%) | 39.34 ms (±3%) | 935.03 ms (±20%) |
+| 4096 × 1024 | 106.60 ms (±2%) | 108.08 ms (±2%) | 12.05 ms (±12%) | 114.10 ms (±2%) | 100.42 ms (±23%) | 1200.25 ms (±37%) | 73.65 ms (±14%) | 1129.81 ms (±19%) |
+
+What it shows:
+
+- Batching the GPU is a real, repeatable win over one GPU call per series once there are
+  16 or more small series: 7× at 16 × 64, 16–22× at 256 × 64, 22–24× at 4,096 × 64,
+  shrinking as each series grows (1.1–1.3× at 16 × 65,536, none for a single series).
+  The per-call GPU path pays a submission and a blocking read-back per series, about
+  0.2–0.3 ms each.
+- It never makes the GPU the right choice. The CPU spread across series (`parallel`
+  batched, the same as rayon over `run_f64` calls) is faster than the batched GPU in every
+  multi-series case, f32 included: 6–19× at 64–1,024 points per series, 3.5–7× at 8,192
+  and 65,536. Batched GPU beats the single-threaded `cpu` loop only from 256 × 8,192
+  up (2.3–3.1×) and at 4,096 × 1,024 (1.5×).
+  The cost the GPU doesn't remove is the one this file already names under "Backends":
+  building each result's output on the host, and the upload of each series' grid times.
+- So the API added nothing a caller can't get with `jobs.par_iter().map(|j| interpolator.run_f64(..))`,
+  and `Backend::Auto` would never have sent batches to the GPU on this machine. Dropped again;
+  revisit only if output assembly moves off the host (GPU-resident results).
+
 ## Conformance
 
 The worst error measured by `tests/contract.rs` against an exact 60-digit reference, in
