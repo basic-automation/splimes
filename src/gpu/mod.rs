@@ -85,42 +85,55 @@ pub fn prewarm_gpu_with_config(config: GpuConfig) -> Result<GpuInfo> {
 	prewarm_gpu()
 }
 
+#[cfg(feature = "gpu")]
 /// The GPU in use, if it has started successfully. Never blocks or starts it. With more
 /// than one device ([`GpuConfig::devices`]), the first; [`gpu_devices`] lists them all.
 #[must_use]
-// Not `const`: whether a public fn is const mustn't depend on a feature.
-#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
 pub fn gpu_info() -> Option<GpuInfo> {
-	#[cfg(feature = "gpu")]
-	return context::try_get().map(|devices| devices.primary().info.clone());
-	#[cfg(not(feature = "gpu"))]
+	context::try_get().map(|devices| devices.primary().info.clone())
+}
+
+#[cfg(not(feature = "gpu"))]
+/// The GPU in use, if it has started successfully. Never blocks or starts it. With more
+/// than one device ([`GpuConfig::devices`]), the first; [`gpu_devices`] lists them all.
+#[must_use]
+pub const fn gpu_info() -> Option<GpuInfo> {
 	None
 }
 
+#[cfg(feature = "gpu")]
 /// Buffer-pool counters, if the GPU has started successfully. With more than one device,
 /// the sum over their pools; [`gpu_devices`] has each.
 #[must_use]
-// Not `const`: whether a public fn is const mustn't depend on a feature.
-#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
 pub fn gpu_pool_stats() -> Option<GpuPoolStats> {
-	#[cfg(feature = "gpu")]
-	return context::try_get().map(|devices| devices.list.iter().map(context::Context::pool_stats).fold(GpuPoolStats::default(), |a, b| GpuPoolStats { idle_sets: a.idle_sets + b.idle_sets, idle_bytes: a.idle_bytes + b.idle_bytes, created: a.created + b.created, reused: a.reused + b.reused, evicted: a.evicted + b.evicted }));
-	#[cfg(not(feature = "gpu"))]
+	context::try_get().map(|devices| devices.list.iter().map(context::Context::pool_stats).fold(GpuPoolStats::default(), |a, b| GpuPoolStats { idle_sets: a.idle_sets + b.idle_sets, idle_bytes: a.idle_bytes + b.idle_bytes, created: a.created + b.created, reused: a.reused + b.reused, evicted: a.evicted + b.evicted }))
+}
+
+#[cfg(not(feature = "gpu"))]
+/// Buffer-pool counters, if the GPU has started successfully. With more than one device,
+/// the sum over their pools; [`gpu_devices`] has each.
+#[must_use]
+pub const fn gpu_pool_stats() -> Option<GpuPoolStats> {
 	None
 }
 
+#[cfg(feature = "gpu")]
 /// Every open device, with its counters, if the GPU has started successfully; the first
 /// is the one [`gpu_info`] reports. Never blocks or starts the GPU.
 #[must_use]
-// Not `const`: whether a public fn is const mustn't depend on a feature.
-#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
 pub fn gpu_devices() -> Vec<GpuDeviceStats> {
-	#[cfg(feature = "gpu")]
-	return context::try_get().map(|devices| devices.list.iter().map(context::Context::stats).collect()).unwrap_or_default();
-	#[cfg(not(feature = "gpu"))]
+	context::try_get().map(|devices| devices.list.iter().map(context::Context::stats).collect()).unwrap_or_default()
+}
+
+#[cfg(not(feature = "gpu"))]
+/// Every open device, with its counters, if the GPU has started successfully; the first
+/// is the one [`gpu_info`] reports. Never blocks or starts the GPU.
+#[must_use]
+pub const fn gpu_devices() -> Vec<GpuDeviceStats> {
 	Vec::new()
 }
 
+#[cfg(feature = "gpu")]
 /// The adapters wgpu offers on this machine, without opening any.
 ///
 /// In the order [`AdapterSelector::Index`] counts; `WGPU_BACKEND` limits the APIs listed,
@@ -130,15 +143,25 @@ pub fn gpu_devices() -> Vec<GpuDeviceStats> {
 /// Listing loads the graphics drivers, as starting the GPU does: call it from the thread
 /// that will start the GPU, not from a thread of its own (see the crate docs' "Backends").
 #[must_use]
-// Not `const`: whether a public fn is const mustn't depend on a feature.
-#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
 pub fn gpu_adapters() -> Vec<GpuAdapterInfo> {
-	#[cfg(feature = "gpu")]
-	return context::adapters();
-	#[cfg(not(feature = "gpu"))]
+	context::adapters()
+}
+
+#[cfg(not(feature = "gpu"))]
+/// The adapters wgpu offers on this machine, without opening any.
+///
+/// In the order [`AdapterSelector::Index`] counts; `WGPU_BACKEND` limits the APIs listed,
+/// and an adapter can appear once per graphics API. Empty without the `gpu` feature or
+/// any adapter.
+///
+/// Listing loads the graphics drivers, as starting the GPU does: call it from the thread
+/// that will start the GPU, not from a thread of its own (see the crate docs' "Backends").
+#[must_use]
+pub const fn gpu_adapters() -> Vec<GpuAdapterInfo> {
 	Vec::new()
 }
 
+#[cfg(feature = "gpu")]
 /// The GPU devices' allocated memory (summed over every open device), if the GPU has started successfully and its backend
 /// can report it. Never blocks or starts the GPU.
 ///
@@ -153,31 +176,52 @@ pub fn gpu_adapters() -> Vec<GpuAdapterInfo> {
 /// the backend has no allocator report: wgpu 30 reports on Vulkan and DX12, not on Metal
 /// or OpenGL. Memory the driver allocates outside wgpu's allocator is never included.
 #[must_use]
-// Not `const`: whether a public fn is const mustn't depend on a feature.
-#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
 pub fn gpu_memory_report() -> Option<GpuMemoryReport> {
-	#[cfg(feature = "gpu")]
-	return context::try_get().and_then(|devices| devices.list.iter().filter_map(context::Context::memory_report).reduce(|a, b| GpuMemoryReport { allocated_bytes: a.allocated_bytes + b.allocated_bytes, reserved_bytes: a.reserved_bytes + b.reserved_bytes, allocations: a.allocations + b.allocations, blocks: a.blocks + b.blocks }));
-	#[cfg(not(feature = "gpu"))]
+	context::try_get().and_then(|devices| devices.list.iter().filter_map(context::Context::memory_report).reduce(|a, b| GpuMemoryReport { allocated_bytes: a.allocated_bytes + b.allocated_bytes, reserved_bytes: a.reserved_bytes + b.reserved_bytes, allocations: a.allocations + b.allocations, blocks: a.blocks + b.blocks }))
+}
+
+#[cfg(not(feature = "gpu"))]
+/// The GPU devices' allocated memory (summed over every open device), if the GPU has started successfully and its backend
+/// can report it. Never blocks or starts the GPU.
+///
+/// Unlike [`gpu_pool_stats`], which counts only the buffer pool's idle sets, this is the
+/// device's own allocator: every live buffer, pooled or not. Use it to check that memory
+/// returns to a steady level between calls, or falls when the pool evicts.
+///
+/// It first lets wgpu free the buffers of work that has already finished (a non-blocking
+/// poll), so a buffer dropped by a completed call is not counted.
+///
+/// `None` when the GPU hasn't started, the crate was built without the `gpu` feature, or
+/// the backend has no allocator report: wgpu 30 reports on Vulkan and DX12, not on Metal
+/// or OpenGL. Memory the driver allocates outside wgpu's allocator is never included.
+#[must_use]
+pub const fn gpu_memory_report() -> Option<GpuMemoryReport> {
 	None
 }
 
+#[cfg(feature = "gpu")]
 /// Whether anything has begun opening the GPU device: it may still be opening, or have
 /// failed to. Never blocks.
-#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
 pub fn started() -> bool {
-	#[cfg(feature = "gpu")]
-	return context::started();
-	#[cfg(not(feature = "gpu"))]
+	context::started()
+}
+
+#[cfg(not(feature = "gpu"))]
+/// Whether anything has begun opening the GPU device: it may still be opening, or have
+/// failed to. Never blocks.
+pub const fn started() -> bool {
 	false
 }
 
+#[cfg(feature = "gpu")]
 /// Runs the kernel on the GPU.
-#[cfg_attr(not(feature = "gpu"), allow(unused_variables, clippy::needless_pass_by_ref_mut))]
 pub fn eval<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, out: &mut [f64]) -> Result<()> {
-	#[cfg(feature = "gpu")]
-	return multi::eval(context::get()?, knots, grid, method, precision, out);
-	#[cfg(not(feature = "gpu"))]
+	multi::eval(context::get()?, knots, grid, method, precision, out)
+}
+
+#[cfg(not(feature = "gpu"))]
+/// Runs the kernel on the GPU.
+pub fn eval<V: Value>(_knots: &Knots<'_, V>, _grid: &Grid, _method: &Method, _precision: Precision, _out: &mut [f64]) -> Result<()> {
 	Err(no_gpu_feature())
 }
 
@@ -191,23 +235,31 @@ pub trait ChunkSink {
 	fn filled(&mut self, first: usize, len: usize) -> ControlFlow<()>;
 }
 
+#[cfg(feature = "gpu")]
 /// Runs the kernel on the GPU in chunks of at most `max_chunk` grid points (and at most
 /// the configured [`GpuConfig::chunk_points`]), handing each to `sink` as it is read back.
-#[cfg_attr(not(feature = "gpu"), allow(unused_variables, clippy::needless_pass_by_ref_mut))]
 pub fn eval_chunks<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, max_chunk: usize, sink: &mut dyn ChunkSink) -> Result<()> {
-	#[cfg(feature = "gpu")]
-	return run::eval_chunks(context::get()?.primary(), knots, grid, method, precision, max_chunk, sink);
-	#[cfg(not(feature = "gpu"))]
+	run::eval_chunks(context::get()?.primary(), knots, grid, method, precision, max_chunk, sink)
+}
+
+#[cfg(not(feature = "gpu"))]
+/// Runs the kernel on the GPU in chunks of at most `max_chunk` grid points (and at most
+/// the configured [`GpuConfig::chunk_points`]), handing each to `sink` as it is read back.
+pub fn eval_chunks<V: Value>(_knots: &Knots<'_, V>, _grid: &Grid, _method: &Method, _precision: Precision, _max_chunk: usize, _sink: &mut dyn ChunkSink) -> Result<()> {
 	Err(no_gpu_feature())
 }
 
+#[cfg(feature = "gpu")]
 /// Whether the GPU is open and can run `precision`. Never blocks and never opens it:
 /// [`Backend::Auto`](crate::Backend::Auto) uses only a GPU the caller has started.
-#[cfg_attr(not(feature = "gpu"), allow(unused_variables, clippy::missing_const_for_fn))]
 pub fn ready(precision: Precision) -> bool {
-	#[cfg(feature = "gpu")]
-	return context::ready(precision);
-	#[cfg(not(feature = "gpu"))]
+	context::ready(precision)
+}
+
+#[cfg(not(feature = "gpu"))]
+/// Whether the GPU is open and can run `precision`. Never blocks and never opens it:
+/// [`Backend::Auto`](crate::Backend::Auto) uses only a GPU the caller has started.
+pub const fn ready(_precision: Precision) -> bool {
 	false
 }
 

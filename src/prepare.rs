@@ -3,7 +3,9 @@
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
-use crate::{Error, Result, time::posix_nanos, value::Value};
+use crate::{
+	Error, Result, time::{nanos_to_f64, posix_nanos, usize_to_f64}, value::Value
+};
 
 /// The input, sorted, de-duplicated and normalised.
 ///
@@ -131,8 +133,8 @@ impl<'a, V: Value> Knots<'a, V> {
 		let offsets: Vec<i128> = distinct.iter().map(|&(n, _, _)| n - t0).collect();
 		let n = offsets.len();
 		let offsets64 = if offsets[n - 1] <= crate::kernel::I64_SPAN { offsets.iter().map(|&o| i64::try_from(o).ok()).collect() } else { None };
-		#[allow(clippy::cast_precision_loss)] // A spacing only needs to be approximately the mean.
-		let h = if n > 1 { offsets[n - 1] as f64 / (n - 1) as f64 } else { 1.0 };
+		// A spacing only needs to be approximately the mean.
+		let h = if n > 1 { nanos_to_f64(offsets[n - 1]) / usize_to_f64(n - 1) } else { 1.0 };
 		let y = raw_values.iter().map(|&v| (v - centre) / scale).collect();
 		let originals = distinct.into_iter().map(|(_, _, v)| v).collect();
 		Ok(Self { t0, h, y, offsets, offsets64, originals, centre, scale, min, max })

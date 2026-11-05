@@ -4,6 +4,7 @@ use std::{
 	collections::VecDeque, ops::ControlFlow, sync::{PoisonError, atomic::Ordering, mpsc}, time::Duration
 };
 
+use bigdecimal::ToPrimitive;
 use rayon::prelude::*;
 use wgpu::{BindGroupDescriptor, BindGroupEntry, Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ErrorFilter, MapMode, PollType};
 
@@ -160,8 +161,9 @@ pub fn captured<T>(device: &wgpu::Device, f: impl FnOnce() -> Result<T>) -> Resu
 /// than 2⁷⁴ ns apart, so every offset and every difference fits.
 fn times(offsets: impl Iterator<Item = i128>, out: &mut Vec<u8>) {
 	for o in offsets {
-		#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Two's-complement words.
-		let words = [o as u32, (o >> 32) as u32, (o >> 64) as u32];
+		// The low 96 bits, two's complement, as little-endian words.
+		let b = o.to_le_bytes();
+		let words = [u32::from_le_bytes([b[0], b[1], b[2], b[3]]), u32::from_le_bytes([b[4], b[5], b[6], b[7]]), u32::from_le_bytes([b[8], b[9], b[10], b[11]])];
 		out.extend_from_slice(bytemuck::cast_slice(&words));
 	}
 }
@@ -184,8 +186,8 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 	times(knots.offsets.iter().copied(), &mut knot_u);
 	let knot_y: Vec<u8> = match precision {
 		Precision::F64 => bytemuck::cast_slice(&knots.y).to_vec(),
-		#[allow(clippy::cast_possible_truncation)] // Single precision is what was asked for.
-		Precision::F32 => bytemuck::cast_slice(&knots.y.iter().map(|&v| v as f32).collect::<Vec<f32>>()).to_vec(),
+		// Single precision is what was asked for (rounds to nearest, as `as` would).
+		Precision::F32 => bytemuck::cast_slice(&knots.y.iter().map(|v| v.to_f32().unwrap_or(f32::NAN)).collect::<Vec<f32>>()).to_vec(),
 	};
 	let knot_u = upload(ctx, "splimes knot times", &knot_u);
 	let knot_y = upload(ctx, "splimes knot values", &knot_y);
@@ -193,8 +195,10 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 	// Times are nanoseconds in both kernels, scaled by 1/h.
 	let inv_h = 1.0 / knots.h;
 	let (lo, hi) = method.bounds.unwrap_or((0.0, 0.0));
-	#[allow(clippy::cast_possible_truncation)] // `len <= MAX_CHUNK`, which fits u32.
-	let header = |len: usize| [n_u32, method.window as u32, u32::from(method.hold), u32::from(method.bounds.is_some()), len as u32, 0, 0, 0];
+	let window = u32::try_from(method.window).map_err(|_| Error::Gpu(format!("a window of {} knots exceeds the GPU kernel's u32 indexing", method.window)))?;
+	// `len <= MAX_CHUNK`, which fits u32.
+	let chunk_u32 = |len: usize| u32::try_from(len).map_err(|_| Error::Gpu(format!("a chunk of {len} points exceeds the GPU kernel's u32 indexing")));
+	let header = |len: u32| [n_u32, window, u32::from(method.hold), u32::from(method.bounds.is_some()), len, 0, 0, 0];
 
 	let mut pending: VecDeque<(Slot, usize, usize, wgpu::SubmissionIndex)> = VecDeque::with_capacity(IN_FLIGHT);
 	// Buffer sets whose chunk has been read back, ready for the next chunk: a call holds at
@@ -205,11 +209,11 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 		ctx.chunks.fetch_add(1, Ordering::Relaxed);
 		let slot = finished.iter().position(|s| s.capacity >= len).map_or_else(|| acquire(ctx, precision, len), |i| finished.swap_remove(i));
 
-		let mut params = bytemuck::cast_slice(&header(len)).to_vec();
+		let len_u32 = chunk_u32(len)?;
+		let mut params = bytemuck::cast_slice(&header(len_u32)).to_vec();
 		match precision {
 			Precision::F64 => params.extend_from_slice(bytemuck::cast_slice(&[inv_h, lo, hi, 0.0])),
-			#[allow(clippy::cast_possible_truncation)]
-			Precision::F32 => params.extend_from_slice(bytemuck::cast_slice(&[inv_h as f32, lo as f32, hi as f32, 0.0])),
+			Precision::F32 => params.extend_from_slice(bytemuck::cast_slice(&[inv_h, lo, hi].map(|v| v.to_f32().unwrap_or(f32::NAN)).into_iter().chain([0.0]).collect::<Vec<f32>>())),
 		}
 		ctx.queue.write_buffer(&slot.params, 0, &params);
 
@@ -241,8 +245,7 @@ fn dispatch<V: Value>(ctx: &Context, kernel: &super::context::Kernel, knots: &Kn
 			let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor { label: Some("splimes"), timestamp_writes: None });
 			pass.set_pipeline(&kernel.pipeline);
 			pass.set_bind_group(0, &bind_group, &[]);
-			#[allow(clippy::cast_possible_truncation)]
-			pass.dispatch_workgroups((len as u32).div_ceil(WORKGROUP), 1, 1);
+			pass.dispatch_workgroups(len_u32.div_ceil(WORKGROUP), 1, 1);
 		}
 		encoder.copy_buffer_to_buffer(&slot.out, 0, &slot.staging, 0, bytes);
 		let submission = ctx.queue.submit(Some(encoder.finish()));

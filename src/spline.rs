@@ -67,7 +67,6 @@ pub enum Spline {
 impl Spline {
 	/// The polynomial degree of the method.
 	#[must_use]
-	#[allow(clippy::trivially_copy_pass_by_ref)] // `&self`, as in 0.1, so method paths keep working.
 	pub const fn degree(&self) -> usize {
 		match *self {
 			Self::Linear => 1,
@@ -85,7 +84,6 @@ impl Spline {
 
 	/// The polynomial extrapolation bounds factor, if any.
 	#[must_use]
-	#[allow(clippy::trivially_copy_pass_by_ref)] // `&self`, as in 0.1, so method paths keep working.
 	pub const fn bounds_factor(&self) -> Option<f64> {
 		match *self {
 			Self::Polynomial(_, bounds) => bounds,

@@ -58,9 +58,9 @@ impl Context {
 	}
 
 	/// Grid points per dispatch on this device.
-	#[allow(clippy::cast_possible_truncation)] // Bounded by MAX_CHUNK.
 	pub fn chunk_len(&self) -> usize {
-		u64::from(self.config.chunk_points.max(1)).min(run::MAX_CHUNK).min(self.max_binding_bytes / run::TIME_BYTES) as usize
+		// Bounded by MAX_CHUNK, which fits usize.
+		usize::try_from(u64::from(self.config.chunk_points.max(1)).min(run::MAX_CHUNK).min(self.max_binding_bytes / run::TIME_BYTES)).unwrap_or(usize::MAX)
 	}
 
 	/// Whether this device can take a call of `knots` knots in `precision`: not lost, has the
