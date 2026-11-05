@@ -111,6 +111,32 @@ pub struct GpuPoolStats {
 	pub evicted: u64,
 }
 
+/// What the GPU device has allocated, from wgpu's memory allocator.
+///
+/// It counts every buffer splimes holds, including those outside the buffer pool (per-call
+/// knot uploads not yet freed, and anything wgpu itself allocates through the same
+/// allocator).
+///
+/// [`GpuPoolStats`] counts only the pool's idle buffer sets; this counts the device. A leak
+/// outside the pool shows here and not there.
+///
+/// Memory the driver allocates internally, outside wgpu's allocator, is not included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct GpuMemoryReport {
+	/// Bytes in live allocations: the sum of every buffer's allocation, after alignment.
+	pub allocated_bytes: u64,
+	/// Bytes in the memory blocks those allocations are carved from, including their free
+	/// space: what the device holds from the driver. At least `allocated_bytes`. The
+	/// allocator keeps emptied blocks for reuse, so this need not fall when buffers are
+	/// freed; watch `allocated_bytes` for leaks.
+	pub reserved_bytes: u64,
+	/// Live allocations.
+	pub allocations: usize,
+	/// Memory blocks.
+	pub blocks: usize,
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

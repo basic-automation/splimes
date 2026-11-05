@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-pub use config::{GpuConfig, GpuInfo, GpuPoolStats};
+pub use config::{GpuConfig, GpuInfo, GpuMemoryReport, GpuPoolStats};
 
 use crate::{Error, Precision, Result, kernel::Method, prepare::Knots, time::Grid, value::Value};
 
@@ -103,6 +103,29 @@ pub fn gpu_info() -> Option<GpuInfo> {
 pub fn gpu_pool_stats() -> Option<GpuPoolStats> {
 	#[cfg(feature = "gpu")]
 	return context::try_get().map(context::Context::pool_stats);
+	#[cfg(not(feature = "gpu"))]
+	None
+}
+
+/// The GPU device's allocated memory, if the GPU has started successfully and its backend
+/// can report it. Never blocks or starts the GPU.
+///
+/// Unlike [`gpu_pool_stats`], which counts only the buffer pool's idle sets, this is the
+/// device's own allocator: every live buffer, pooled or not. Use it to check that memory
+/// returns to a steady level between calls, or falls when the pool evicts.
+///
+/// It first lets wgpu free the buffers of work that has already finished (a non-blocking
+/// poll), so a buffer dropped by a completed call is not counted.
+///
+/// `None` when the GPU hasn't started, the crate was built without the `gpu` feature, or
+/// the backend has no allocator report: wgpu 30 reports on Vulkan and DX12, not on Metal
+/// or OpenGL. Memory the driver allocates outside wgpu's allocator is never included.
+#[must_use]
+// Not `const`: whether a public fn is const mustn't depend on a feature.
+#[cfg_attr(not(feature = "gpu"), allow(clippy::missing_const_for_fn))]
+pub fn gpu_memory_report() -> Option<GpuMemoryReport> {
+	#[cfg(feature = "gpu")]
+	return context::try_get().and_then(context::Context::memory_report);
 	#[cfg(not(feature = "gpu"))]
 	None
 }
