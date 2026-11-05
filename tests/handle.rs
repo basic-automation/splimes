@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! `Interpolator::submit` / `submit_f64`: GPU work that no thread waits for.
 //!
 //! The GPU is a process-wide singleton, so this binary configures it once, with tiny
