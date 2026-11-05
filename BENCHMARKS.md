@@ -230,6 +230,36 @@ an idle machine, before and after 1.1.0.
 | 60 | 19 µs |
 | 1,440 | 184 µs |
 
+## More than one GPU (5.7)
+
+`benches/multi_gpu.rs`, cubic, criterion means with 95% intervals. `split` is one call of
+N grid points; `concurrent` is 8 calls of 1,048,576 points from 8 threads. Measured
+2026-11-04 on the machine above, driver 615.78.08, Mesa 26.2.5 (RADV), splimes 1.2.0 plus
+the multi-GPU branch, criterion 10 samples. The only second adapter here is the
+7950X3D's integrated GPU (RADV, shares system RAM), so "two devices" is a discrete card plus a
+much slower iGPU, not two equal cards. The machine was loaded throughout (1-minute load
+29 to 42 on 16 cores; it never dropped below 4 in a 20-minute wait), so read the numbers
+as relative.
+
+| Case | One (RTX) | All (RTX + iGPU) | List 0,1 (same pair) |
+|------|----------:|-----------------:|---------------------:|
+| split f64 4 Mi | 36.8 ms [33.0–39.7] | 84.6 ms [76.6–92.5] | 75.6 ms [67.7–83.5] |
+| split f64 16 Mi | 75.9 ms [73.0–79.6] | 217.5 ms [213.3–221.6] | 214.1 ms [210.3–218.0] |
+| split f64 64 Mi | 249.2 ms [246.4–252.3] | 324.3 ms [322.2–326.1] | 323.6 ms [321.1–326.3] |
+| split f32 4 Mi | 40.3 ms [34.9–45.7] | 44.6 ms [43.3–46.7] | 42.8 ms [42.1–43.6] |
+| split f32 16 Mi | 109.8 ms [103.7–116.0] | 115.4 ms [113.1–118.7] | 114.4 ms [112.2–117.4] |
+| split f32 64 Mi | 286.8 ms [253.1–321.6] | 318.6 ms [313.6–324.3] | 335.4 ms [317.4–356.0] |
+| concurrent f64 8×1 Mi | 26.5 ms [26.1–27.0] | 94.1 ms [92.5–95.8] | 94.2 ms [92.8–95.6] |
+| concurrent f32 8×1 Mi | 42.3 ms [40.7–43.9] | 45.4 ms [44.0–46.5] | 45.8 ms [44.8–46.8] |
+
+Adding this iGPU makes every case slower, f64 most (up to 3.6× on `concurrent`): the
+work queue hands the iGPU chunks it finishes long after the RTX would have, and
+least-loaded routing sends whole small calls to it. The default, `GpuDevices::One`, is
+the unchanged single-device path. Use `All` or `List` only with devices of similar
+speed. On a discrete-plus-integrated machine, pick the discrete card with
+`GpuConfig::adapter`. A speed-weighted split was not built, and no machine with two
+discrete GPUs was available to measure the case this feature is for.
+
 ## Conformance
 
 The worst error measured by `tests/contract.rs` against an exact 60-digit reference, in
