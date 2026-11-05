@@ -57,6 +57,10 @@ harness = false
 name = "multi_gpu"
 harness = false
 
+[[bench]]
+name = "batch"
+harness = false
+
 # Runs child processes that exit mid-GPU-work, so it needs its own `main`.
 [[test]]
 name = "spawn_exit"

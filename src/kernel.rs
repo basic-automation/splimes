@@ -283,22 +283,23 @@ pub fn narrow_offsets<'k, V: Value>(knots: &'k Knots<'_, V>, grid: &Grid) -> Opt
 	knots.offsets64.as_deref().filter(|_| within(start) && within(last))
 }
 
-/// Every grid point, normalised, on the calling thread.
-pub fn eval_serial<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64]) {
+/// Grid points `first..first + out.len()`, normalised, on the calling thread. Each point's
+/// value depends only on its index, so any split of the grid gives the same results.
+pub fn eval_serial<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, first: usize, out: &mut [f64]) {
 	match Offsets::new(knots, grid) {
-		Offsets::I64(data, g) => eval_chunk(data, &g, method, 0, out),
-		Offsets::I128(data, g) => eval_chunk(data, &g, method, 0, out),
+		Offsets::I64(data, g) => eval_chunk(data, &g, method, first, out),
+		Offsets::I128(data, g) => eval_chunk(data, &g, method, first, out),
 	}
 }
 
-/// Every grid point, normalised, across rayon's pool.
-pub fn eval_parallel<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64]) {
-	fn run<N: Nanos>(data: Data<'_, N>, g: &GridOffsets<N>, method: &Method, out: &mut [f64]) {
-		out.par_chunks_mut(PARALLEL_CHUNK).enumerate().for_each(|(c, chunk)| eval_chunk(data, g, method, c * PARALLEL_CHUNK, chunk));
+/// Grid points `first..first + out.len()`, normalised, across rayon's pool.
+pub fn eval_parallel<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, first: usize, out: &mut [f64]) {
+	fn run<N: Nanos>(data: Data<'_, N>, g: &GridOffsets<N>, method: &Method, first: usize, out: &mut [f64]) {
+		out.par_chunks_mut(PARALLEL_CHUNK).enumerate().for_each(|(c, chunk)| eval_chunk(data, g, method, first + c * PARALLEL_CHUNK, chunk));
 	}
 	match Offsets::new(knots, grid) {
-		Offsets::I64(data, g) => run(data, &g, method, out),
-		Offsets::I128(data, g) => run(data, &g, method, out),
+		Offsets::I64(data, g) => run(data, &g, method, first, out),
+		Offsets::I128(data, g) => run(data, &g, method, first, out),
 	}
 }
 
@@ -343,7 +344,9 @@ pub fn f32_unsafe_windows<V: Value>(knots: &Knots<'_, V>, method: &Method) -> Op
 /// The `f32` kernel writes a non-finite value rather than clamping one, and windows that
 /// mix dense and sparse knots can underflow it to a plausible finite 0; both get their
 /// correct value here.
-pub fn repair<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, out: &mut [f64], unsafe_windows: Option<&[bool]>) -> usize {
+///
+/// `out` holds grid points `first..first + out.len()`.
+pub fn repair<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, first: usize, out: &mut [f64], unsafe_windows: Option<&[bool]>) -> usize {
 	let data = knots.data();
 	let n = data.offsets.len();
 	match unsafe_windows {
@@ -352,7 +355,7 @@ pub fn repair<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, out:
 			.enumerate()
 			.filter(|(_, v)| !v.is_finite())
 			.map(|(k, v)| {
-				let t = grid.offset_nanos(knots.t0, k);
+				let t = grid.offset_nanos(knots.t0, first + k);
 				*v = eval(data, method, t, data.offsets.partition_point(|&o| o <= t), &mut Window::new());
 			})
 			.count(),
@@ -363,7 +366,7 @@ pub fn repair<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, out:
 				let mut window = Window::new();
 				let mut p = None;
 				let mut repaired = 0;
-				for (v, t) in chunk.iter_mut().zip(grid.offsets(knots.t0, c * PARALLEL_CHUNK)) {
+				for (v, t) in chunk.iter_mut().zip(grid.offsets(knots.t0, first + c * PARALLEL_CHUNK)) {
 					let mut q = p.unwrap_or_else(|| data.offsets.partition_point(|&o| o <= t));
 					while q < n && data.offsets[q] <= t {
 						q += 1;
@@ -528,7 +531,7 @@ mod tests {
 		// A one-second grid across all the knots and beyond, so it crosses the bad gap.
 		let grid = Grid::new(ts[0] - chrono::TimeDelta::seconds(500), ts[ts.len() - 1] + chrono::TimeDelta::seconds(500), crate::Resolution::Seconds).expect("a grid");
 		let mut expected = vec![0.0; grid.len];
-		eval_serial(&knots, &grid, &method, &mut expected);
+		eval_serial(&knots, &grid, &method, 0, &mut expected);
 
 		// Non-finite values are recomputed wherever they are, each from its own window.
 		let broken = [0, 7, 12_345, grid.len / 2, grid.len - 1];
@@ -536,14 +539,14 @@ mod tests {
 		for (k, &i) in broken.iter().enumerate() {
 			out[i] = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][k % 3];
 		}
-		assert_eq!(repair(&knots, &grid, &method, &mut out, None), broken.len());
+		assert_eq!(repair(&knots, &grid, &method, 0, &mut out, None), broken.len());
 		assert!(out.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()), "non-finite points recomputed as the CPU computes them");
 
 		// With unsafe windows, every point in one is recomputed (even a plausible finite
 		// value), and no other point is touched.
 		let unsafe_windows = f32_unsafe_windows(&knots, &method).expect("one gap is out of range");
 		let mut out = vec![0.0; grid.len];
-		let repaired = repair(&knots, &grid, &method, &mut out, Some(&unsafe_windows));
+		let repaired = repair(&knots, &grid, &method, 0, &mut out, Some(&unsafe_windows));
 		let n = knots.offsets.len();
 		let mut in_unsafe = 0;
 		for (k, t) in grid.offsets(knots.t0, 0).take(grid.len).enumerate() {
@@ -557,6 +560,48 @@ mod tests {
 		}
 		assert!(in_unsafe > 0);
 		assert_eq!(repaired, in_unsafe);
+	}
+
+	/// Streaming evaluates and repairs the grid a range at a time; every split, serial or
+	/// parallel, gives the whole grid's values bit for bit, including ranges that start
+	/// mid-way through a parallel block and ranges in windows across the bad gap.
+	#[test]
+	fn ranges_match_the_whole_grid() {
+		let (ts, vs) = one_bad_gap();
+		let knots = Knots::new(ts.len(), |i| ts[i], |i| &vs[i], false).expect("valid");
+		let method = Method::new(Spline::Cubic, &knots);
+		// Minutes: about 34,000 points, across the bad gap.
+		let grid = Grid::new(ts[0] - chrono::TimeDelta::seconds(500), ts[ts.len() - 1] + chrono::TimeDelta::seconds(500), crate::Resolution::Minutes).expect("a grid");
+		assert!(grid.len > 2 * PARALLEL_CHUNK);
+		let mut whole = vec![0.0; grid.len];
+		eval_parallel(&knots, &grid, &method, 0, &mut whole);
+		let unsafe_windows = f32_unsafe_windows(&knots, &method).expect("one gap is out of range");
+		let mut whole_repaired = vec![0.0; grid.len];
+		let whole_count = repair(&knots, &grid, &method, 0, &mut whole_repaired, Some(&unsafe_windows));
+		assert!(whole_count > 0, "the grid crosses the bad gap");
+		for size in [1, 7, PARALLEL_CHUNK + 3] {
+			let (mut serial, mut parallel, mut repaired, mut count) = (Vec::new(), Vec::new(), Vec::new(), 0);
+			let mut first = 0;
+			while first < grid.len {
+				let len = size.min(grid.len - first);
+				let mut part = vec![0.0; len];
+				eval_serial(&knots, &grid, &method, first, &mut part);
+				serial.push((first, part));
+				let mut part = vec![0.0; len];
+				eval_parallel(&knots, &grid, &method, first, &mut part);
+				parallel.extend(part);
+				let mut part = vec![0.0; len];
+				count += repair(&knots, &grid, &method, first, &mut part, Some(&unsafe_windows));
+				repaired.extend(part);
+				first += len;
+			}
+			for (first, part) in serial {
+				assert!(part.iter().zip(&whole[first..]).all(|(a, b)| a.to_bits() == b.to_bits()), "serial, {size}-point ranges, from {first}");
+			}
+			assert!(parallel.iter().zip(&whole).all(|(a, b)| a.to_bits() == b.to_bits()), "parallel, {size}-point ranges");
+			assert!(repaired.iter().zip(&whole_repaired).all(|(a, b)| a.to_bits() == b.to_bits()), "repair, {size}-point ranges");
+			assert_eq!(count, whole_count, "repair count, {size}-point ranges");
+		}
 	}
 
 	#[test]
