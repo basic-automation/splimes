@@ -10,7 +10,7 @@
 use rayon::prelude::*;
 
 use crate::{
-	MAX_POLYNOMIAL_DEGREE, Spline, prepare::Knots, time::{Grid, nanos_to_f64}, value::Value
+	MAX_POLYNOMIAL_DEGREE, Spline, prepare::Knots, time::{Grid, i64_to_f64, nanos_to_f64}, value::Value
 };
 
 /// The largest window: a degree-8 polynomial passes through 9 knots.
@@ -41,7 +41,7 @@ impl Method {
 		let bounds = spline.bounds_factor().map(|b| {
 			let (lo, hi) = knots.y_range();
 			let range = hi - lo;
-			(lo - b * range, hi + b * range)
+			(b.mul_add(-range, lo), b.mul_add(range, hi))
 		});
 		Self { window, hold: matches!(spline, Spline::Cubic), bounds }
 	}
@@ -76,9 +76,8 @@ impl Nanos for i128 {
 impl Nanos for i64 {
 	#[inline]
 	fn to_f64(self) -> f64 {
-		#[allow(clippy::cast_precision_loss)] // Rounds to nearest, exactly as `nanos_to_f64`.
-		let v = self as f64;
-		v
+		// Rounds to nearest, exactly as `nanos_to_f64`.
+		i64_to_f64(self)
 	}
 
 	#[inline]
@@ -152,58 +151,57 @@ impl Window {
 /// loses about one ulp of the window's span, which with geometrically spaced knots is many
 /// times the local spacing.
 #[inline]
-#[allow(clippy::many_single_char_names)] // The usual names in the numerics literature.
-pub fn eval<N: Nanos>(data: Data<'_, N>, method: &Method, t: N, p: usize, window: &mut Window) -> f64 {
-	let Data { offsets, y, inv_h } = data;
-	let n = offsets.len();
-	let below = t < offsets[0];
-	let outside = below || t > offsets[n - 1];
+pub fn eval<N: Nanos>(data: Data<'_, N>, method: &Method, time: N, preceding: usize, window: &mut Window) -> f64 {
+	let Data { offsets, y: values, inv_h } = data;
+	let knots = offsets.len();
+	let below = time < offsets[0];
+	let outside = below || time > offsets[knots - 1];
 	if method.hold && outside {
-		return if below { y[0] } else { y[n - 1] };
+		return if below { values[0] } else { values[knots - 1] };
 	}
-	let m = method.window;
-	// The window of m knots centred on t's segment, slid inward at the ends: one formula
-	// for every method (see the table on `Spline`).
-	let start = window_start(n, m, p);
-	let o = &offsets[start..start + m];
-	let value = match m {
-		1 => y[start],
+	let width = method.window;
+	// The window of `width` knots centred on the time's segment, slid inward at the ends:
+	// one formula for every method (see the table on `Spline`).
+	let start = window_start(knots, width, preceding);
+	let local = &offsets[start..start + width];
+	let value = match width {
+		1 => values[start],
 		2 => {
-			let alpha = diff(t, o[0], inv_h) / diff(o[1], o[0], inv_h);
-			y[start] + alpha * (y[start + 1] - y[start])
+			let alpha = diff(time, local[0], inv_h) / diff(local[1], local[0], inv_h);
+			alpha.mul_add(values[start + 1] - values[start], values[start])
 		}
 		_ => {
-			window.prepare(data, start, m);
+			window.prepare(data, start, width);
 			let mut dt = [0.0; MAX_WINDOW];
-			let mut s: f64 = 1.0;
-			for (d, &ok) in dt.iter_mut().zip(o) {
-				*d = diff(t, ok, inv_h);
-				s = s.max(d.abs());
+			let mut largest: f64 = 1.0;
+			for (delta, &knot) in dt.iter_mut().zip(local) {
+				*delta = diff(time, knot, inv_h);
+				largest = largest.max(delta.abs());
 			}
-			// Far outside the data each term grows like dt^(m-1) and they alternate in
+			// Far outside the data each term grows like dt^(width-1) and they alternate in
 			// sign, so forming them directly overflows (inf - inf = NaN) long before the
-			// value itself does. Summing with every dt divided by s, then multiplying the
-			// sum by s^(m-1), only overflows when the true value does, and then to an
-			// infinity of the right sign, which the bounds clamp handles correctly.
-			let scaled = s > SCALE_FROM;
+			// value itself does. Summing with every dt divided by `largest`, then multiplying
+			// the sum by `largest^(width-1)`, only overflows when the true value does, and
+			// then to an infinity of the right sign, which the bounds clamp handles correctly.
+			let scaled = largest > SCALE_FROM;
 			if scaled {
-				for d in &mut dt[..m] {
-					*d /= s;
+				for delta in &mut dt[..width] {
+					*delta /= largest;
 				}
 			}
 			let mut total = 0.0;
-			for (j, &weight) in window.weight[..m].iter().enumerate() {
+			for (index, &weight) in window.weight[..width].iter().enumerate() {
 				let mut term = weight;
-				for (k, &d) in dt[..m].iter().enumerate() {
-					if k != j {
-						term *= d;
+				for (other, &delta) in dt[..width].iter().enumerate() {
+					if other != index {
+						term *= delta;
 					}
 				}
 				total += term;
 			}
 			if scaled {
-				for _ in 1..m {
-					total *= s;
+				for _ in 1..width {
+					total *= largest;
 				}
 			}
 			total
@@ -444,14 +442,11 @@ mod tests {
 		let o: Vec<i128> = (0..8).map(|i| i * 9 + i * i / 2).collect();
 		for degree in 1..=5_i32 {
 			let f = |t: f64| (0..=degree).map(|k| f64::from(k + 1) * (t / 10.0).powi(k)).sum::<f64>() / 10.0;
-			#[allow(clippy::cast_precision_loss)]
-			let y: Vec<f64> = o.iter().map(|&t| f(t as f64)).collect();
-			#[allow(clippy::cast_sign_loss)]
-			let m = method(degree as usize + 1);
+			let y: Vec<f64> = o.iter().map(|&t| f(nanos_to_f64(t))).collect();
+			let m = method(usize::try_from(degree).expect("positive") + 1);
 			for t in [-13, 2, 17, 33, 50, 79] {
 				let got = at(&o, &y, &m, t);
-				#[allow(clippy::cast_precision_loss)]
-				let expected = f(t as f64);
+				let expected = f(nanos_to_f64(t));
 				assert!((got - expected).abs() < 1e-9 * expected.abs().max(1.0), "degree {degree} at {t}: {got} vs {expected}");
 			}
 		}
@@ -500,7 +495,7 @@ mod tests {
 	/// big one (~20,000× the mean) is not.
 	fn one_bad_gap() -> (Vec<chrono::DateTime<chrono::Utc>>, Vec<f64>) {
 		let secs: Vec<i64> = (0..20_000).chain((0..5).map(|i| 21_999 + 2_000_000 - 2_000 + i)).collect();
-		let values = secs.iter().map(|&s| (s as f64 * 0.37).sin()).collect();
+		let values = secs.iter().map(|&s| (i64_to_f64(s) * 0.37).sin()).collect();
 		(secs.iter().map(|&s| chrono::DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(s)).collect(), values)
 	}
 

@@ -476,17 +476,10 @@ impl<N: Nanos> Walk<N> {
 
 /// A normalised kernel result back in the caller's units, if it is finite there.
 fn denormalise<V: Value>(knots: &Knots<'_, V>, y: f64) -> Option<V> {
-	let v = y * knots.scale + knots.centre;
-	// Near f64::MAX the product can overflow although the sum doesn't; a fused multiply-add
-	// rounds once, at the end. (It's slow without hardware FMA, so only as a fallback.) A
-	// value within the knots' own range is finite however `centre` and `scale` rounded.
-	let v = if v.is_finite() {
-		v
-	} else if y.abs() <= 1.0 {
-		y.mul_add(knots.scale, knots.centre).clamp(knots.min, knots.max)
-	} else {
-		y.mul_add(knots.scale, knots.centre)
-	};
+	// Fused, so the product can't overflow although the sum doesn't. A value within the
+	// knots' own range is finite however `centre` and `scale` rounded.
+	let v = y.mul_add(knots.scale, knots.centre);
+	let v = if !v.is_finite() && y.abs() <= 1.0 { v.clamp(knots.min, knots.max) } else { v };
 	V::from_finite_f64(v)
 }
 

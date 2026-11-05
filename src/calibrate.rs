@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use bigdecimal::ToPrimitive;
 use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::{AutoThresholds, Backend, Interpolator, Precision, Resolution, Result, Spline, set_auto_thresholds};
@@ -68,9 +69,8 @@ pub fn calibrate() -> Result<Calibration> {
 		// A millisecond grid of `points` points, with the knots spread across it at an
 		// irregular spacing (a deterministic jitter) so the whole grid interpolates.
 		let span_ms = i64::try_from(points).unwrap_or(i64::MAX) - 1;
-		let spacing = span_ms as f64 / f64::from(KNOTS);
-		#[allow(clippy::cast_possible_truncation)]
-		let timestamps: Vec<DateTime<Utc>> = (0..KNOTS).map(|i| origin + TimeDelta::microseconds((1000.0 * spacing * (f64::from(i) + 0.4 * f64::from((i * 7919) % 100) / 100.0)) as i64)).collect();
+		let spacing = crate::time::i64_to_f64(span_ms) / f64::from(KNOTS);
+		let timestamps: Vec<DateTime<Utc>> = (0..KNOTS).map(|i| origin + TimeDelta::microseconds((1000.0 * spacing * (f64::from(i) + 0.4 * f64::from((i * 7919) % 100) / 100.0)).to_i64().unwrap_or(i64::MAX))).collect();
 		let end = origin + TimeDelta::milliseconds(span_ms);
 		let time = |backend, precision| -> Result<Duration> {
 			let interpolator = Interpolator::new(Spline::Cubic, Resolution::Milliseconds).backend(backend).gpu_precision(precision);

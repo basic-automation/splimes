@@ -40,15 +40,13 @@ impl TickUnit {
 		if nanos == 0 || nanos > i64::MAX as u64 {
 			return None;
 		}
-		#[allow(clippy::cast_possible_wrap)] // Checked above.
-		Some(Self { nanos: nanos as i64 })
+		Some(Self { nanos: nanos.cast_signed() })
 	}
 
 	/// Nanoseconds per tick.
 	#[must_use]
-	#[allow(clippy::cast_sign_loss)] // Always positive.
 	pub const fn nanos_per_tick(self) -> u64 {
-		self.nanos as u64
+		self.nanos.cast_unsigned()
 	}
 
 	/// The ticks chrono can represent, as an inclusive range.

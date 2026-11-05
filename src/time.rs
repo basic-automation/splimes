@@ -7,6 +7,7 @@
 //! 1e9 or more); on the POSIX scale it is the same instant as `00:00:00.x` the next
 //! second, which is also what chrono's own addition assumes.
 
+use bigdecimal::ToPrimitive;
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 
 use crate::{Error, Resolution, Result};
@@ -22,8 +23,8 @@ pub fn posix_nanos(t: DateTime<Utc>) -> i128 {
 /// second.
 pub fn from_posix_nanos(nanos: i128) -> Option<DateTime<Utc>> {
 	let secs = i64::try_from(nanos.div_euclid(NANOS_PER_SECOND)).ok()?;
-	#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // In 0..1e9.
-	let subsec = nanos.rem_euclid(NANOS_PER_SECOND) as u32;
+	// In 0..1e9.
+	let subsec = u32::try_from(nanos.rem_euclid(NANOS_PER_SECOND)).ok()?;
 	DateTime::from_timestamp(secs, subsec)
 }
 
@@ -31,8 +32,19 @@ pub fn from_posix_nanos(nanos: i128) -> Option<DateTime<Utc>> {
 /// targets; offsets almost always fit `i64`, whose conversion is one instruction.
 #[inline]
 pub fn nanos_to_f64(nanos: i128) -> f64 {
-	#[allow(clippy::cast_precision_loss)]
-	i64::try_from(nanos).map_or(nanos as f64, |n| n as f64)
+	i64::try_from(nanos).map_or_else(|_| nanos.to_f64().unwrap_or(f64::NAN), i64_to_f64)
+}
+
+/// `n` as the nearest `f64` (what `n as f64` rounds to; the conversion never fails).
+#[inline]
+pub fn i64_to_f64(n: i64) -> f64 {
+	n.to_f64().unwrap_or(f64::NAN)
+}
+
+/// `n` as the nearest `f64` (what `n as f64` rounds to; the conversion never fails).
+#[inline]
+pub fn usize_to_f64(n: usize) -> f64 {
+	n.to_f64().unwrap_or(f64::NAN)
 }
 
 /// The output grid: `start, start + step, …` up to and including `end`, on the POSIX
@@ -110,10 +122,10 @@ pub struct Clock<'g> {
 impl<'g> Clock<'g> {
 	const SECONDS_PER_DAY: i64 = 86_400;
 
-	pub const fn new(grid: &'g Grid) -> Self {
+	pub fn new(grid: &'g Grid) -> Self {
 		let step_secs = grid.step_nanos.div_euclid(1_000_000_000);
-		#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // In 0..1e9.
-		let step_subsec = grid.step_nanos.rem_euclid(1_000_000_000) as u32;
+		// In 0..1e9.
+		let step_subsec = u32::try_from(grid.step_nanos.rem_euclid(1_000_000_000)).unwrap_or_default();
 		Self { grid, next: usize::MAX, secs: 0, subsec: 0, step_secs, step_subsec, day: None }
 	}
 
@@ -123,9 +135,8 @@ impl<'g> Clock<'g> {
 			let nanos = self.grid.start_nanos + i128::from(self.grid.step_nanos) * k as i128;
 			// Grid points are representable instants, so their seconds fit `i64`.
 			self.secs = i64::try_from(nanos.div_euclid(NANOS_PER_SECOND)).unwrap_or(i64::MAX);
-			#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // In 0..1e9.
-			let subsec = nanos.rem_euclid(NANOS_PER_SECOND) as u32;
-			self.subsec = subsec;
+			// In 0..1e9.
+			self.subsec = u32::try_from(nanos.rem_euclid(NANOS_PER_SECOND)).unwrap_or_default();
 		}
 		let (days, second_of_day) = (self.secs.div_euclid(Self::SECONDS_PER_DAY), self.secs.rem_euclid(Self::SECONDS_PER_DAY));
 		let date = match self.day {

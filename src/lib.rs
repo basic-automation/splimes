@@ -160,13 +160,10 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
-#![warn(missing_docs, clippy::pedantic, clippy::nursery)]
-#![allow(clippy::module_name_repetitions, clippy::cast_precision_loss)]
-// `mul_add` is a slow libm call on targets without hardware FMA (including baseline
-// x86-64), and fusing would make the CPU round differently from the WGSL kernels.
-#![allow(clippy::suboptimal_flops)]
-// Proving `Send` through wgpu's nested types exceeds the default limit of 128.
-#![recursion_limit = "256"]
+#![warn(missing_docs)]
+#![recursion_limit = "1024"]
+#![deny(clippy::pedantic, clippy::nursery, clippy::all)]
+#![allow(clippy::multiple_crate_versions)]
 
 pub use auto::{AutoThresholds, auto_thresholds, set_auto_thresholds};
 pub use calibrate::{Calibration, CalibrationSample, calibrate};

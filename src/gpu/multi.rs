@@ -68,8 +68,10 @@ fn split_eval<V: Value>(usable: &[&Context], chunk: usize, knots: &Knots<'_, V>,
 	};
 	let results: Vec<Result<()>> = std::thread::scope(|scope| {
 		// Collected so every other device starts before this thread drives the first.
-		#[allow(clippy::needless_collect)]
-		let others: Vec<_> = usable[1..].iter().map(|&ctx| scope.spawn(move || worker(ctx))).collect();
+		let mut others = Vec::with_capacity(usable.len() - 1);
+		for &ctx in &usable[1..] {
+			others.push(scope.spawn(move || worker(ctx)));
+		}
 		let mut results = vec![worker(usable[0])];
 		results.extend(others.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(Error::Gpu("a GPU worker thread panicked".to_owned())))));
 		results
