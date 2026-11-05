@@ -10,6 +10,40 @@ supported Rust version is a minor-version change.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-04
+
+### Added
+
+- **Epoch-tick input.** `Interpolator::run_epoch` takes samples as `i64` ticks after the
+  Unix epoch in a `TickUnit` (`NANOSECONDS`, `MICROSECONDS`, `MILLISECONDS`, `SECONDS`, or
+  `TickUnit::from_nanos`), with `start` and `end` in the same unit. No `DateTime` is built
+  for the input, and the result is bit-identical to `run_f64` on the same instants.
+  New errors: `Error::TickOutOfRange` and `Error::GridNotInTicks`.
+- **Streamed output.** `Interpolator::stream_f64` and `Interpolator::stream_epoch` hand
+  the result to a callback in `Chunk`s as they are computed instead of returning it all
+  at the end, and return a `StreamSummary`; the callback can stop early with
+  `ControlFlow::Break`. `stream_chunk_points` sets the chunk size. On the GPU, read-back
+  overlaps compute; at 16 Mi points the first chunk arrived in 2–4 ms against 97–193 ms
+  for `run_f64` (BENCHMARKS.md, "Streaming"; measured on a loaded machine).
+- **More than one GPU.** `gpu_adapters()` lists the adapters wgpu finds
+  (`GpuAdapterInfo`). `GpuConfig::with_adapter` picks one (`AdapterSelector`), and
+  `GpuConfig::with_devices` (`GpuDevices::One`, `All`, `List`) with
+  `with_split_min_points` spreads a call's chunks over several devices from a shared work
+  queue. `gpu_devices()` reports per-device stats (`GpuDeviceStats`), and a lost device's
+  work moves to the others. The default, `GpuDevices::One`, is unchanged. On the only
+  multi-adapter machine measured (a discrete GPU with an integrated one), splitting was
+  slower than one device in every case, so it is opt-in (BENCHMARKS.md, "More than one
+  GPU (5.7)"). Two equal discrete GPUs have not been measured.
+- **Device memory report.** `gpu_memory_report()` returns the GPU allocator's own
+  figures (`GpuMemoryReport`: allocated and reserved bytes, allocations, blocks), not
+  only the buffer pool's bytes. It is available on Vulkan and DX12 and is `None`
+  elsewhere. `examples/gpu_memory.rs` checks it for drift over repeated calls.
+- Benchmarks and harnesses for two features that were measured again and left out:
+  command batching across many series (`benches/batch.rs`, BENCHMARKS.md "Many series")
+  and non-blocking GPU handles (`examples/handles.rs`, BENCHMARKS.md "Overlapping
+  requests"). Neither won reproducibly against what splimes already does (the CPU
+  spread across series; `spawn_f64`), so neither API ships.
+
 ## [1.2.0] - 2026-10-12
 
 ### Added
@@ -260,7 +294,8 @@ that history.
 
 - `Point::random` is now test-only, and `fake` is no longer a runtime dependency.
 
-[Unreleased]: https://github.com/basic-automation/splimes/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/basic-automation/splimes/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/basic-automation/splimes/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/basic-automation/splimes/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/basic-automation/splimes/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/basic-automation/splimes/compare/v0.1.0...v1.0.0
