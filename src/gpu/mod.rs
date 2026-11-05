@@ -1,6 +1,6 @@
 //! The GPU backend and its process-wide device.
 
-use std::sync::OnceLock;
+use std::{ops::ControlFlow, sync::OnceLock};
 
 pub use config::{GpuConfig, GpuInfo, GpuMemoryReport, GpuPoolStats};
 
@@ -143,6 +143,26 @@ pub fn started() -> bool {
 pub fn eval<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, out: &mut [f64]) -> Result<()> {
 	#[cfg(feature = "gpu")]
 	return run::eval(context::get()?, knots, grid, method, precision, out);
+	#[cfg(not(feature = "gpu"))]
+	Err(no_gpu_feature())
+}
+
+/// Where the GPU delivers its results, a chunk at a time, in grid order.
+pub trait ChunkSink {
+	/// The buffer for the normalised results of grid points `first..first + len`.
+	fn dest(&mut self, first: usize, len: usize) -> &mut [f64];
+
+	/// [`dest`](Self::dest)'s buffer now holds the chunk. Runs while the GPU computes the
+	/// next chunk. `Break` stops the call: no further chunk is dispatched.
+	fn filled(&mut self, first: usize, len: usize) -> ControlFlow<()>;
+}
+
+/// Runs the kernel on the GPU in chunks of at most `max_chunk` grid points (and at most
+/// the configured [`GpuConfig::chunk_points`]), handing each to `sink` as it is read back.
+#[cfg_attr(not(feature = "gpu"), allow(unused_variables, clippy::needless_pass_by_ref_mut))]
+pub fn eval_chunks<V: Value>(knots: &Knots<'_, V>, grid: &Grid, method: &Method, precision: Precision, max_chunk: usize, sink: &mut dyn ChunkSink) -> Result<()> {
+	#[cfg(feature = "gpu")]
+	return run::eval_chunks(context::get()?, knots, grid, method, precision, max_chunk, sink);
 	#[cfg(not(feature = "gpu"))]
 	Err(no_gpu_feature())
 }

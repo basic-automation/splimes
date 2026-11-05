@@ -20,7 +20,7 @@ pub fn posix_nanos(t: DateTime<Utc>) -> i128 {
 
 /// The instant `nanos` after the Unix epoch, if chrono can represent it. Never a leap
 /// second.
-fn from_posix_nanos(nanos: i128) -> Option<DateTime<Utc>> {
+pub fn from_posix_nanos(nanos: i128) -> Option<DateTime<Utc>> {
 	let secs = i64::try_from(nanos.div_euclid(NANOS_PER_SECOND)).ok()?;
 	#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // In 0..1e9.
 	let subsec = nanos.rem_euclid(NANOS_PER_SECOND) as u32;

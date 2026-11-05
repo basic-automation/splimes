@@ -30,7 +30,10 @@
 //!
 //! For more control — the backend, GPU precision, refusing to fall back to a simpler
 //! method — use an [`Interpolator`]. For `f64` data, [`Interpolator::run_f64`] skips the
-//! `BigDecimal` conversions.
+//! `BigDecimal` conversions, and [`Interpolator::run_epoch`] takes integer epoch ticks
+//! (see [`TickUnit`]) instead of `DateTime`s. [`Interpolator::stream_f64`] and
+//! [`Interpolator::stream_epoch`] deliver the grid a [`Chunk`] at a time, as each is
+//! computed, so output can be serialised before the whole grid is done.
 //!
 //! # The grid
 //!
@@ -162,6 +165,7 @@
 
 pub use auto::{AutoThresholds, auto_thresholds, set_auto_thresholds};
 pub use calibrate::{Calibration, CalibrationSample, calibrate};
+pub use epoch::TickUnit;
 pub use error::{Error, Result};
 pub use gpu::{GpuConfig, GpuInfo, GpuMemoryReport, GpuPoolStats, configure_gpu, gpu_config, gpu_info, gpu_memory_report, gpu_pool_stats, prewarm_gpu, prewarm_gpu_with_config};
 pub use interpolation::{Backend, Interpolation, Interpolator, Precision, interpolate};
@@ -169,12 +173,14 @@ pub use point::{Point, PointKind};
 pub use resolution::Resolution;
 pub use spawn::InterpolationFuture;
 pub use spline::{MAX_POLYNOMIAL_DEGREE, Spline};
+pub use stream::{Chunk, StreamSummary};
 pub use value::Value;
 
 #[cfg(feature = "tokio")]
 mod asynk;
 mod auto;
 mod calibrate;
+mod epoch;
 mod error;
 mod gpu;
 mod interpolation;
@@ -184,6 +190,7 @@ mod prepare;
 mod resolution;
 mod spawn;
 mod spline;
+mod stream;
 mod time;
 mod value;
 

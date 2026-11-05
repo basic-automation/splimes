@@ -111,6 +111,27 @@ pub enum Error {
 		input: String,
 	},
 
+	/// An epoch tick (an input, `start` or `end`) is outside the instants chrono can
+	/// represent, about ±262,000 years from 1970.
+	#[error("epoch tick {tick} of {nanos_per_tick} ns is outside the representable range")]
+	TickOutOfRange {
+		/// The offending tick.
+		tick: i64,
+		/// The tick length, in nanoseconds.
+		nanos_per_tick: u64,
+	},
+
+	/// [`Interpolator::stream_epoch`](crate::Interpolator::stream_epoch) was asked for a
+	/// grid whose points fall between ticks: a resolution finer than the tick, or not a
+	/// whole number of ticks.
+	#[error("a {resolution} grid has points between {nanos_per_tick} ns ticks")]
+	GridNotInTicks {
+		/// The requested grid resolution.
+		resolution: crate::Resolution,
+		/// The tick length, in nanoseconds.
+		nanos_per_tick: u64,
+	},
+
 	/// The task running an interpolation for async code failed: the interpolation
 	/// panicked (a bug), tokio cancelled its blocking task
 	/// (`Interpolator::run_async`), or an

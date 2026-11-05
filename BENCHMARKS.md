@@ -230,6 +230,36 @@ an idle machine, before and after 1.1.0.
 | 60 | 19 µs |
 | 1,440 | 184 µs |
 
+## Streaming
+
+Time to first output, cubic, 4,096 inputs, chunks of 262,144 grid points. `run_f64`
+returns nothing until the whole grid is done; `stream_f64` and `stream_epoch` (epoch
+microseconds in, ticks out) hand over each chunk as it finishes. Criterion medians, 10
+samples.
+
+| Grid points | Backend | `run_f64` | `stream_f64` first | `stream_f64` total | `stream_epoch` first | `stream_epoch` total |
+|------------:|---------|------:|------:|------:|------:|------:|
+| 1,048,576 | `Parallel` | 4.28 ms | 1.69 ms | 6.46 ms | 2.22 ms | 6.35 ms |
+| 1,048,576 | `Gpu` f64 | 11.4 ms | 2.37 ms | 7.05 ms | 3.23 ms | 6.02 ms |
+| 1,048,576 | `Gpu` f32 | 12.0 ms | 4.10 ms | 9.92 ms | 3.82 ms | 5.62 ms |
+| 16,777,216 | `Parallel` | 97.4 ms | 1.89 ms | 105 ms | 1.86 ms | 102 ms |
+| 16,777,216 | `Gpu` f64 | 145 ms | 2.95 ms | 107 ms | 1.95 ms | 91.3 ms |
+| 16,777,216 | `Gpu` f32 | 193 ms | 2.85 ms | 130 ms | 4.29 ms | 149 ms |
+
+The first chunk arrives in 2–4 ms at either size. On the GPU the streamed total also beats
+`run_f64`, because readback overlaps compute. On `Parallel` at 1 Mi points, streaming
+costs about 50% more in total than `run_f64` (per-chunk overhead). Use it for latency, not
+throughput, at that size.
+
+Measured 2026-11-04 on an RTX 4070 Ti SUPER (NVIDIA 615.78.08, Vulkan) and a Ryzen 9
+7950X3D, Linux 7.2.8, rustc 1.100.0-nightly (2026-09-22). The machine was **not** quiet:
+1-minute load was 29 at the start and 67 at the end, and a 20-minute wait never brought
+it below 4. Another process held 8.4 GB of GPU memory. Expect noise of ±10–20%.
+
+```bash
+cargo bench --bench interpolation -- stream
+```
+
 ## Many series
 
 Command batching was dropped before 1.0 and re-added for 1.3 to check that decision on a

@@ -54,13 +54,20 @@ impl<'a, V: Value> Knots<'a, V> {
 	/// [`Error::NoPoints`] for empty input; [`Error::ValueOutOfRange`] for a value with no
 	/// finite `f64` representation.
 	pub fn new(len: usize, timestamp: impl Fn(usize) -> DateTime<Utc> + Sync, value: impl Fn(usize) -> &'a V + Sync, parallel: bool) -> Result<Self> {
+		Self::from_nanos(len, |i| posix_nanos(timestamp(i)), &timestamp, value, parallel)
+	}
+
+	/// [`new`](Self::new), with each sample's instant given as POSIX nanoseconds by `nanos`;
+	/// `timestamp` is only called to name a bad sample in an error, and must agree with
+	/// `nanos`. Epoch-tick input comes in here without building a `DateTime` per sample.
+	pub fn from_nanos(len: usize, nanos: impl Fn(usize) -> i128 + Sync, timestamp: impl Fn(usize) -> DateTime<Utc>, value: impl Fn(usize) -> &'a V + Sync, parallel: bool) -> Result<Self> {
 		if len == 0 {
 			return Err(Error::NoPoints);
 		}
 		// Each value is converted once: for `BigDecimal` that is most of the cost.
 		let sample = |i: usize| {
 			let v = value(i);
-			v.to_finite_f64().map(|y| (posix_nanos(timestamp(i)), y, v)).ok_or(i)
+			v.to_finite_f64().map(|y| (nanos(i), y, v)).ok_or(i)
 		};
 		// Every value must be finite, including ones a later duplicate replaces: whether bad
 		// input is reported mustn't depend on its position. The first in input order is named.
