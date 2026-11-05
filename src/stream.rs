@@ -178,13 +178,15 @@ impl Interpolator {
 	///
 	/// let at = |s| Utc.timestamp_opt(s, 0).unwrap();
 	/// let (ts, vs) = ([at(0), at(10)], [0.0, 10.0]);
+	/// let interpolator = Interpolator::new(Spline::Linear, Resolution::Seconds).backend(Backend::Cpu).stream_chunk_points(4);
 	/// let mut seen = Vec::new();
-	/// let summary = Interpolator::new(Spline::Linear, Resolution::Seconds).backend(Backend::Cpu).stream_chunk_points(4).stream_f64(&ts, &vs, at(0), at(10), |chunk| {
+	/// let summary = interpolator.stream_f64(&ts, &vs, at(0), at(10), |chunk| {
 	///     seen.extend_from_slice(chunk.values());
 	///     ControlFlow::Continue(())
 	/// })?;
 	/// assert_eq!((summary.len(), summary.chunks()), (11, 3));
-	/// assert_eq!(seen, (0..=10).map(f64::from).collect::<Vec<_>>());
+	/// // The same values, bit for bit, as one `run_f64` call.
+	/// assert_eq!(seen, interpolator.run_f64(&ts, &vs, at(0), at(10))?.values());
 	/// # Ok::<(), splimes::Error>(())
 	/// ```
 	///
