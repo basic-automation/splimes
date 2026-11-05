@@ -100,7 +100,7 @@ mod tests {
 	/// An irregular series of `n` knots and its grid at one-second resolution.
 	fn series(n: usize) -> (Vec<DateTime<Utc>>, Vec<f64>) {
 		let ts: Vec<_> = (0..i64::try_from(n).expect("small")).map(|i| at(i * 10 + (i * 7919) % 7)).collect();
-		let values = (0..n).map(|i| (i as f64 * 0.37).sin() * 100.0 + i as f64).collect();
+		let values = (0..u32::try_from(n).expect("small")).map(f64::from).map(|x| (x * 0.37).sin().mul_add(100.0, x)).collect();
 		(ts, values)
 	}
 
